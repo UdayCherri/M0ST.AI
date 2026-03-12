@@ -127,6 +127,8 @@ class PlannerAgent:
         print("[Planner] Starting full analysis pipeline...")
 
         self._run_stage("static_analysis", result, binary_path)
+        self._run_stage("call_graph_building", result, binary_path)
+        self._run_stage("symbol_recovery", result, binary_path)
         self._run_stage("gnn_analysis", result, binary_path)
         self._run_stage("pseudocode_extraction", result, binary_path)
         self._run_stage("llm_analysis", result, binary_path)
@@ -207,6 +209,25 @@ class PlannerAgent:
                     self.sqlite.save_cfg_embedding(addr, emb.get("graph_embedding", []))
             except Exception:
                 pass
+
+    def _stage_call_graph_building(self, result: AnalysisResult, binary_path: str):
+        """Build inter-procedural call graph from static analysis results."""
+        try:
+            from security_modules.reverse_engineering.call_graph import CallGraphBuilder
+            builder = CallGraphBuilder(self.g)
+            builder.build_call_graph()
+        except Exception as e:
+            print(f"[Planner] Call graph building skipped: {e}")
+
+    def _stage_symbol_recovery(self, result: AnalysisResult, binary_path: str):
+        """Run symbol recovery on all functions."""
+        try:
+            from ai_engine.symbol_recovery import SymbolRecoveryEngine
+            engine = SymbolRecoveryEngine(self.g)
+            predictions = engine.recover_all()
+            self._memory["symbol_predictions"] = predictions
+        except Exception as e:
+            print(f"[Planner] Symbol recovery skipped: {e}")
 
     def _stage_pseudocode_extraction(self, result: AnalysisResult, binary_path: str):
         if self.pseudo is None:
@@ -393,3 +414,15 @@ class PlannerAgent:
 
     def ai_refine(self, func_addr: int, binary_path: Optional[str] = None) -> Dict[str, Any]:
         return self.analyse_function(func_addr, binary_path)
+
+    def ai_ask(self, question: str) -> Dict[str, Any]:
+        """Answer a free-form question using the LLM semantic agent."""
+        if self.semantic and hasattr(self.semantic, "ask"):
+            return self.semantic.ask(question)
+        return {"error": "Semantic agent not available or does not support ask()"}
+
+    def find_similar(self, func_addr: int, top_k: int = 5) -> list:
+        """Find structurally similar functions via the GraphAgent."""
+        if self.graph and hasattr(self.graph, "find_similar"):
+            return self.graph.find_similar(func_addr, top_k=top_k)
+        return []

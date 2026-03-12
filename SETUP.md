@@ -205,26 +205,50 @@ Tools marked `NOT FOUND` will use fallback implementations.
 
 ## 6. Quick Test
 
+Once inside the CLI, you will first see the **module selection menu**:
+
 ```
-spider> load tests/binaries/ret
-spider> list funcs
-spider> complexity
-spider> ai full
-spider> ai name 0x401000
-spider> plugins list
-spider> export report.json
-spider> quit
+  Select analysis modules to enable:
+    [1] Reverse Engineering
+    [2] AI Binary Intelligence
+    [3] Network Traffic Analysis
+    [0] Full Mode (all modules)
+
+  Enter choice (default: 0 — Full Mode):
 ```
+
+Press **Enter** (or type `0`) for Full Mode. Then try:
+
+```
+m0st> status                         # Check tool availability
+m0st> load tests/binaries/ret        # Disassemble a test binary
+m0st> list funcs                     # List discovered functions
+m0st> complexity                     # Show cyclomatic complexity
+m0st> ai full                        # Full AI analysis pipeline
+m0st> ai name 0x401000               # AI-suggested function name
+m0st> ai ask what does this do?      # Free-form AI query
+m0st> plugins list                   # Available plugins
+m0st> export report.json             # Export analysis results
+m0st> verbose on                     # Enable verbose pipeline output
+m0st> verbose off                    # Quiet mode (spinner only)
+m0st> help                           # Help index
+m0st> help ai                        # AI command help
+m0st> quit
+```
+
+**Verbose mode:** By default the pipeline runs in quiet mode with an animated spinner showing progress. Use `verbose on` to see all agent output, or launch with `python main.py --verbose`.
 
 ---
 
 ## Troubleshooting
 
-| Issue                 | Solution                                                             |
-| --------------------- | -------------------------------------------------------------------- |
-| `ModuleNotFoundError` | Activate venv and run `pip install -r requirements.txt`              |
-| `r2pipe` import fails | Install radare2 and add to PATH                                      |
-| LLM returns empty     | Check `config.yml` for correct `llm.provider` and `llm.api_key`      |
-| GNN fallback active   | Install `torch` and `torch-geometric`, or provide a model checkpoint |
-| Pipeline timeout      | Increase `pipeline.event_timeout_seconds` in `config.yml`            |
-| Windows path errors   | Use forward slashes or raw strings in paths                          |
+| Issue                         | Solution                                                                                     |
+| ----------------------------- | -------------------------------------------------------------------------------------------- |
+| `ModuleNotFoundError`         | Activate venv and run `pip install -r requirements.txt`                                      |
+| `r2pipe` import fails         | Install radare2 and add to PATH                                                              |
+| LLM returns empty             | Check `config.yml` for correct `llm.provider` and `llm.api_key`                              |
+| GNN fallback active           | Install `torch` and `torch-geometric`, or provide a model checkpoint                         |
+| Pipeline timeout              | Increase `pipeline.event_timeout_seconds` in `config.yml`                                    |
+| Windows path errors           | Use forward slashes or raw strings in paths                                                  |
+| r2 INFO/WARN lines visible    | Use `verbose off` (default) — set `e log.level=0` is applied automatically                   |
+| `VulnerabilityDetector` error | Ensure `security_modules/` package is on `sys.path` (use `python main.py` from project root) |

@@ -6,10 +6,13 @@ Enhanced context construction with PKG-aware prompting (M0ST Step 6).
 """
 
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from core.capabilities import Capability
+
+logger = logging.getLogger("m0st.llm_agent")
 
 try:
     import openai
@@ -152,6 +155,24 @@ class LLMAgent:
 
     # ── Enhanced prompt construction (Step 6) ──────────────────────────────
 
+    def build_prompt(self, task: str, instruction: str, disassembly: str = "",
+                     pseudocode: str = "", metadata: Optional[Dict] = None,
+                     gnn_embedding: Optional[List[float]] = None,
+                     extra: str = "", context_functions: Optional[List[str]] = None,
+                     call_chains: Optional[List[str]] = None,
+                     data_flow: Optional[str] = None) -> str:
+        """Public interface for prompt construction."""
+        return self._build_prompt(
+            task=task, instruction=instruction, disassembly=disassembly,
+            pseudocode=pseudocode, metadata=metadata, gnn_embedding=gnn_embedding,
+            extra=extra, context_functions=context_functions,
+            call_chains=call_chains, data_flow=data_flow,
+        )
+
+    def query(self, prompt: str) -> str:
+        """Public interface for raw LLM query."""
+        return self._query(prompt)
+
     def _build_prompt(self, task: str, instruction: str, disassembly: str = "",
                       pseudocode: str = "", metadata: Optional[Dict] = None,
                       gnn_embedding: Optional[List[float]] = None,
@@ -207,48 +228,210 @@ class LLMAgent:
         except Exception as e:
             return json.dumps({"error": f"LLM query failed: {str(e)}"})
 
-    def _query_json(self, prompt: str) -> Dict[str, Any]:
+    def _query_json(self, prompt: str, max_retries: int = 2) -> Dict[str, Any]:
+        """
+        Query the LLM and extract valid JSON from the response.
+
+        Implements robust JSON extraction:
+        1. Strip markdown fences, thinking tags, preamble text
+        2. Find first '{' and last '}' to extract JSON substring
+        3. On first failure, retry once with an explicit JSON-repair prompt
+        4. Fallback: wrap raw response into a structured dict
+        """
         raw = self._query(prompt)
+        logger.debug("LLM raw response (attempt 1): %s", raw[:500])
+
+        parsed = self._extract_json(raw)
+        if parsed is not None:
+            return parsed
+
+        # Log the full failing response for debugging
+        logger.debug("Raw LLM text that failed JSON parse (first 800 chars): %s", repr(raw[:800]))
+
+        # Retry once with explicit repair prompt instead of repeating the same query
+        logger.debug("JSON parse failed on first attempt, retrying with repair prompt.")
+        repair_prompt = (
+            "Your previous response was not valid JSON. "
+            "Convert the following text into ONLY a valid JSON object. "
+            "Output nothing except the JSON object — no markdown, no explanation, "
+            "no code fences.\n\n"
+            + raw[:3000]
+        )
+        raw2 = self._query(repair_prompt)
+        logger.debug("LLM repair response: %s", raw2[:500])
+
+        parsed = self._extract_json(raw2)
+        if parsed is not None:
+            return parsed
+
+        logger.debug("JSON extraction failed after repair attempt. Using fallback.")
+        # Build a usable fallback from the raw text
+        return self._build_fallback(raw)
+
+    @staticmethod
+    def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+        """
+        Attempt to extract a JSON object from raw LLM output.
+
+        Handles: markdown fences, <thinking> tags, preamble text,
+        unescaped newlines inside strings, trailing commas.
+        """
+        import re as _re
+
+        text = text.strip()
+
+        # Strip <thinking>...</thinking> blocks (Anthropic extended thinking)
+        text = _re.sub(r"<thinking>.*?</thinking>", "", text, flags=_re.DOTALL).strip()
+
+        # Strip markdown fences (```json ... ``` or ``` ... ```)
+        text = _re.sub(r"```(?:json)?\s*\n?", "", text).strip()
+
+        # Attempt 1: parse the full text
         try:
-            text = raw.strip()
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
-                text = "\n".join(lines)
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"raw_response": raw, "error": "Failed to parse JSON from LLM response"}
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Attempt 2: find first '{' and last '}' and extract substring
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            candidate = text[first_brace:last_brace + 1]
+            try:
+                result = json.loads(candidate)
+                if isinstance(result, dict):
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # Attempt 3: fix common JSON issues
+            cleaned = candidate
+            # Remove trailing commas before } or ]
+            cleaned = _re.sub(r",\s*([}\]])", r"\1", cleaned)
+            # Escape literal newlines inside string values
+            # (newlines that appear between quotes)
+            cleaned = _re.sub(
+                r'"((?:[^"\\]|\\.)*)"',
+                lambda m: '"' + m.group(1).replace('\n', '\\n').replace('\r', '') + '"',
+                cleaned,
+            )
+            try:
+                result = json.loads(cleaned)
+                if isinstance(result, dict):
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # Attempt 4: line-by-line reconstruction — drop non-JSON lines
+            lines = candidate.split("\n")
+            reconstructed = []
+            for line in lines:
+                stripped = line.strip()
+                # Skip lines that look like prose (no JSON tokens)
+                if stripped and not any(c in stripped for c in '{}[]:,"'):
+                    continue
+                reconstructed.append(line)
+            if reconstructed:
+                try:
+                    result = json.loads("\n".join(reconstructed))
+                    if isinstance(result, dict):
+                        return result
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+        return None
+
+    @staticmethod
+    def _build_fallback(raw: str) -> Dict[str, Any]:
+        """Build a usable fallback dict from raw LLM text."""
+        text = raw.strip()[:1000] if raw.strip() else "No response"
+        # Try to extract a one-line summary from the first sentence
+        first_sentence = text.split(".")[0].strip() if "." in text else text[:200]
+        return {
+            "summary": first_sentence,
+            "behavior": text[:500],
+            "raw_response": raw[:2000],
+            "error": "Failed to parse JSON from LLM response",
+            "side_effects": [],
+            "algorithmic_intent": "",
+            "complexity_estimate": "unknown",
+            "vulnerabilities": [],
+            "name": "unknown",
+            "confidence": 0.0,
+            "reasoning": "JSON parse failed — raw text fallback",
+            "variables": [],
+            "parameters": [],
+            "return_type": "unknown",
+            "locals": [],
+            "annotated_code": "",
+        }
 
     def _query_openai(self, prompt: str) -> str:
-        response = self.client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You are an expert binary analyst. Always respond with valid JSON."},
+                {"role": "system", "content": "You are an expert binary analyst. Always respond with valid JSON. No markdown fences, no explanations outside the JSON object."},
                 {"role": "user", "content": prompt},
             ],
             temperature=self.temperature, max_tokens=self.max_tokens,
         )
+        try:
+            kwargs["response_format"] = {"type": "json_object"}
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception:
+            kwargs.pop("response_format", None)
+            response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
     def _query_anthropic(self, prompt: str) -> str:
         response = self.client.messages.create(
             model=self.model, max_tokens=self.max_tokens,
             temperature=self.temperature,
-            system="You are an expert binary analyst. Always respond with valid JSON.",
-            messages=[{"role": "user", "content": prompt}],
+            system="You are an expert binary analyst. Always respond with valid JSON. No markdown, no explanations outside the JSON object.",
+            messages=[
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "{"},
+            ],
         )
-        return response.content[0].text if response.content else ""
+        text = response.content[0].text if response.content else ""
+        # Prepend the '{' we used as prefill
+        return "{" + text
 
     def _query_openai_compat(self, prompt: str) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": "You are an expert binary analyst. Always respond with valid JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=self.temperature, max_tokens=self.max_tokens,
-        )
-        return response.choices[0].message.content or ""
+        messages = [
+            {"role": "system", "content": "You are an expert binary analyst. Respond ONLY with a valid JSON object. No markdown, no text outside the JSON."},
+            {"role": "user", "content": prompt},
+        ]
+        # Try response_format first (supported by Ollama, vLLM, etc.)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature, max_tokens=self.max_tokens,
+                response_format={"type": "json_object"},
+            )
+            return response.choices[0].message.content or ""
+        except Exception:
+            pass
+        # Fallback: prefill with '{' so the model continues JSON
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages + [{"role": "assistant", "content": "{"}],
+                temperature=self.temperature, max_tokens=self.max_tokens,
+            )
+            text = response.choices[0].message.content or ""
+            return "{" + text
+        except Exception:
+            # Final fallback: send without prefill
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature, max_tokens=self.max_tokens,
+            )
+            return response.choices[0].message.content or ""
 
     def _init_client(self):
         if self.provider == "openai":

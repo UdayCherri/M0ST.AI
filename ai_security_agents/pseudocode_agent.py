@@ -56,8 +56,12 @@ class PseudocodeAgent:
             result["normalized"] = self._normalize_pseudocode(result["pseudocode"])
             result["variables"] = self._extract_variables(result["pseudocode"])
             result["calls"] = self._extract_calls(result["pseudocode"])
+            result["control_structures"] = self._extract_control_structures(result["pseudocode"])
             result["has_loops"] = self._detect_loops(result["pseudocode"])
             result["has_branches"] = self._detect_branches(result["pseudocode"])
+
+            # Store pseudocode in the PKG
+            self._store_in_pkg(func_addr, result)
 
         self._cache[func_addr] = result
         return result
@@ -96,7 +100,7 @@ if func is None:
 
 if func is not None:
     results = decompiler.decompileFunction(func, 60, monitor)
-    if results.depiledFunction() is not None:
+    if results.getDecompiledFunction() is not None:
         print("__DECOMPILED_START__")
         print(results.getDecompiledFunction().getC())
         print("__DECOMPILED_END__")
@@ -237,9 +241,16 @@ decompiler.dispose()
         }
 
     def _normalize_pseudocode(self, code: str) -> str:
-        code = re.sub(r"\n{3,}", "\n\n", code)
+        # Remove warnings
         code = re.sub(r"//\s*WARNING:.*\n", "", code)
         code = re.sub(r"/\*\s*WARNING:.*?\*/", "", code, flags=re.DOTALL)
+        # Remove Ghidra/r2 boilerplate comments
+        code = re.sub(r"/\*.*?\bghidra\b.*?\*/", "", code, flags=re.DOTALL | re.IGNORECASE)
+        code = re.sub(r"//.*?r2\s*$", "", code, flags=re.MULTILINE)
+        # Remove raw hex address comments like /* 0x004012ab */
+        code = re.sub(r"/\*\s*0x[0-9a-fA-F]+\s*\*/", "", code)
+        # Collapse excessive blank lines
+        code = re.sub(r"\n{3,}", "\n\n", code)
         lines = []
         for line in code.split("\n"):
             stripped = line.rstrip()
@@ -283,3 +294,27 @@ decompiler.dispose()
             if re.search(pat, code, re.IGNORECASE):
                 return True
         return False
+
+    def _extract_control_structures(self, code: str) -> List[Dict[str, Any]]:
+        """Extract control structure metadata from pseudocode."""
+        structures = []
+        for match in re.finditer(r"\b(if|while|for|do|switch)\b", code, re.IGNORECASE):
+            structures.append({
+                "type": match.group(1).lower(),
+                "offset": match.start(),
+            })
+        return structures
+
+    def _store_in_pkg(self, func_addr: int, result: Dict[str, Any]):
+        """Persist pseudocode and metadata in the PKG via annotations."""
+        if not hasattr(self.g, "annotate"):
+            return
+        entity_id = hex(func_addr)
+        self.g.annotate(entity_id, "pseudocode", result.get("normalized") or result.get("pseudocode", ""))
+        self.g.annotate(entity_id, "pseudocode_source", result.get("source", "unknown"))
+        if result.get("variables"):
+            self.g.annotate(entity_id, "pseudocode_variables", result["variables"])
+        if result.get("calls"):
+            self.g.annotate(entity_id, "pseudocode_calls", result["calls"])
+        if result.get("control_structures"):
+            self.g.annotate(entity_id, "pseudocode_control_structures", result["control_structures"])

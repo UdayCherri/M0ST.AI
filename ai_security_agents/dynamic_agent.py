@@ -1,6 +1,8 @@
+import logging
 import os
 import platform
 import shutil
+import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from core.capabilities import Capability
@@ -12,12 +14,66 @@ try:
 except ImportError:
     _PYGDBMI_AVAILABLE = False
 
+logger = logging.getLogger("m0st.dynamic_agent")
+
+# ---------------------------------------------------------------------------
+# Strategy constants
+# ---------------------------------------------------------------------------
+STRATEGY_GDB = "gdb"
+STRATEGY_DOCKER = "docker"
+STRATEGY_WINDBG = "windbg"
+STRATEGY_X64DBG = "x64dbg"
+
+
+def _detect_strategy() -> str:
+    """Choose the best dynamic analysis strategy for the current platform."""
+    cfg = get_config()
+    forced = cfg.get("dynamic", {}).get("strategy")
+    if forced and forced in {STRATEGY_GDB, STRATEGY_DOCKER, STRATEGY_WINDBG, STRATEGY_X64DBG}:
+        return forced
+
+    if platform.system() != "Windows":
+        return STRATEGY_GDB
+
+    # On Windows: prefer WinDbg > x64dbg > Docker > skip
+    windbg_path = cfg.get("tools", {}).get("windbg_path") or ""
+    if windbg_path and shutil.which(windbg_path):
+        return STRATEGY_WINDBG
+
+    x64dbg_path = cfg.get("tools", {}).get("x64dbg_path") or ""
+    if x64dbg_path and os.path.isfile(x64dbg_path):
+        return STRATEGY_X64DBG
+
+    if shutil.which("docker") and _docker_daemon_available():
+        return STRATEGY_DOCKER
+
+    return ""
+
+
+def _docker_daemon_available() -> bool:
+    """Return True only if the Docker daemon is reachable."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
 
 class DynamicAgent:
     """
     Executes the binary in a controlled environment.
-    Uses gdb for step-by-step tracing to capture register states,
-    memory changes, and executed basic blocks.
+
+    Supports multiple strategies:
+    - **gdb** (Linux/macOS): pygdbmi-based step tracing via GDB/MI.
+    - **docker**: Run a Linux GDB container on any platform.
+    - **windbg**: Use the CDB command-line debugger on Windows.
+    - **x64dbg**: Use x64dbg command-line on Windows.
+
+    Strategy is auto-selected based on platform, or can be forced via
+    ``config.yml`` → ``dynamic.strategy``.
     """
     CAPABILITIES = {Capability.DYNAMIC_EXECUTE}
 
@@ -25,31 +81,212 @@ class DynamicAgent:
         self.g = graph_store
         self.bus = bus
 
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
     def run(self, binary_path: str, run_id: str = "run_1"):
-        if not _PYGDBMI_AVAILABLE:
-            print("[DynamicAgent] pygdbmi is not installed. Install it for dynamic tracing.")
-            print("[DynamicAgent] Skipping dynamic trace.")
-            if self.bus is not None:
-                self.bus.publish("DYNAMIC_TRACE_READY", {"run_id": run_id, "binary": binary_path})
-            return
+        strategy = _detect_strategy()
+        logger.info("Dynamic analysis strategy: %s", strategy or "none")
 
         if not os.path.isfile(binary_path):
-            print(f"[DynamicAgent] Binary not found: {binary_path}")
-            if self.bus is not None:
-                self.bus.publish("DYNAMIC_TRACE_READY", {"run_id": run_id, "binary": binary_path})
+            logger.warning("Binary not found: %s", binary_path)
+            self._publish_ready(run_id, binary_path)
+            return
+
+        # Ask user permission for Docker (it launches containers)
+        if strategy == STRATEGY_DOCKER:
+            try:
+                answer = input(
+                    "[DynamicAgent] Docker-based tracing will run the binary "
+                    "inside a container. Proceed? [y/N] "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = ""
+            if answer not in ("y", "yes"):
+                print("[DynamicAgent] Docker tracing skipped by user.")
+                self._publish_ready(run_id, binary_path)
+                return
+
+        if strategy == STRATEGY_GDB:
+            self._run_gdb(binary_path, run_id)
+        elif strategy == STRATEGY_DOCKER:
+            self._run_docker(binary_path, run_id)
+        elif strategy == STRATEGY_WINDBG:
+            self._run_windbg(binary_path, run_id)
+        elif strategy == STRATEGY_X64DBG:
+            self._run_x64dbg(binary_path, run_id)
+        else:
+            logger.warning("No dynamic analysis backend available. Skipping.")
+            self._publish_ready(run_id, binary_path)
+
+    def _publish_ready(self, run_id: str, binary_path: str):
+        if self.bus is not None:
+            self.bus.publish("DYNAMIC_TRACE_READY",
+                             {"run_id": run_id, "binary": binary_path})
+
+    # ------------------------------------------------------------------
+    # Strategy: Docker (platform-independent)
+    # ------------------------------------------------------------------
+    def _run_docker(self, binary_path: str, run_id: str):
+        """Run GDB tracing inside a Docker container (Linux image)."""
+        cfg = get_config()
+        image = cfg.get("dynamic", {}).get("docker_image", "m0st/gdb-trace:latest")
+        abs_path = os.path.abspath(binary_path)
+        bin_dir = os.path.dirname(abs_path)
+        bin_name = os.path.basename(abs_path)
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--security-opt", "seccomp=unconfined",
+            "-v", f"{bin_dir}:/work:ro",
+            image,
+            "/work/" + bin_name,
+        ]
+        logger.info("Docker trace: %s", " ".join(cmd))
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120
+            )
+            if result.returncode != 0:
+                logger.error("Docker trace failed:\n%s", result.stderr[:500])
+            else:
+                self._parse_docker_output(result.stdout, run_id)
+        except FileNotFoundError:
+            logger.error("Docker not found on PATH.")
+        except subprocess.TimeoutExpired:
+            logger.error("Docker trace timed out.")
+        self._publish_ready(run_id, binary_path)
+
+    def _parse_docker_output(self, stdout: str, run_id: str):
+        """Parse JSON lines from the docker trace container."""
+        import json
+        for line in stdout.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = rec.get("type")
+            if kind == "bb_hit":
+                self.g.add_executes_edge(
+                    run_id=run_id,
+                    bb_addr=rec.get("addr", 0),
+                    seq=rec.get("seq", 0),
+                    pc=rec.get("addr", 0),
+                    next_pc=rec.get("next_pc", 0),
+                    regs=rec.get("regs", {}),
+                )
+
+    # ------------------------------------------------------------------
+    # Strategy: WinDbg / CDB (Windows)
+    # ------------------------------------------------------------------
+    def _run_windbg(self, binary_path: str, run_id: str):
+        """Use CDB (command-line WinDbg) for lightweight trace."""
+        cfg = get_config()
+        cdb_path = cfg.get("tools", {}).get("windbg_path") or "cdb"
+
+        bb_addrs = self.g.fetch_all_basic_blocks()
+        if not bb_addrs:
+            logger.warning("No basic blocks for WinDbg trace.")
+            self._publish_ready(run_id, binary_path)
+            return
+
+        self.g.create_run(run_id, binary_path)
+
+        # Build a CDB script that sets breakpoints and logs hits
+        bp_cmds = []
+        for addr in bb_addrs[:200]:  # limit breakpoints
+            bp_cmds.append(f"bp 0x{addr:x}")
+        bp_cmds.append("g")  # go
+        script = "\n".join(bp_cmds) + "\nq\n"
+
+        try:
+            result = subprocess.run(
+                [cdb_path, "-g", "-G", binary_path],
+                input=script, capture_output=True, text=True, timeout=60
+            )
+            self._parse_cdb_output(result.stdout, run_id)
+        except FileNotFoundError:
+            logger.error("CDB not found at '%s'.", cdb_path)
+        except subprocess.TimeoutExpired:
+            logger.error("CDB trace timed out.")
+        self._publish_ready(run_id, binary_path)
+
+    def _parse_cdb_output(self, stdout: str, run_id: str):
+        """Extract breakpoint hits from CDB output."""
+        import re
+        seq = 0
+        for line in stdout.splitlines():
+            m = re.search(r'Breakpoint\s+\d+\s+hit\s*.*?(0x[0-9a-fA-F]+)', line)
+            if m:
+                addr = int(m.group(1), 16)
+                self.g.add_executes_edge(
+                    run_id=run_id, bb_addr=addr, seq=seq,
+                    pc=addr, next_pc=addr, regs={},
+                )
+                seq += 1
+
+    # ------------------------------------------------------------------
+    # Strategy: x64dbg (Windows)
+    # ------------------------------------------------------------------
+    def _run_x64dbg(self, binary_path: str, run_id: str):
+        """Use x64dbg command-line interface for trace."""
+        cfg = get_config()
+        x64dbg_path = cfg.get("tools", {}).get("x64dbg_path", "")
+        if not x64dbg_path or not os.path.isfile(x64dbg_path):
+            logger.error("x64dbg not found at '%s'.", x64dbg_path)
+            self._publish_ready(run_id, binary_path)
+            return
+
+        bb_addrs = self.g.fetch_all_basic_blocks()
+        if not bb_addrs:
+            logger.warning("No basic blocks for x64dbg trace.")
+            self._publish_ready(run_id, binary_path)
+            return
+
+        self.g.create_run(run_id, binary_path)
+
+        # x64dbg script: set breakpoints and run
+        script_lines = []
+        for addr in bb_addrs[:200]:
+            script_lines.append(f"bp 0x{addr:x}")
+        script_lines.append("run")
+        script_lines.append("exit")
+        script_content = "\n".join(script_lines)
+
+        script_path = os.path.join(os.path.dirname(binary_path), "_m0st_trace.txt")
+        try:
+            with open(script_path, "w") as f:
+                f.write(script_content)
+            result = subprocess.run(
+                [x64dbg_path, binary_path, "-s", script_path],
+                capture_output=True, text=True, timeout=60,
+            )
+            logger.info("x64dbg exited with code %d", result.returncode)
+        except FileNotFoundError:
+            logger.error("x64dbg executable not found.")
+        except subprocess.TimeoutExpired:
+            logger.error("x64dbg trace timed out.")
+        finally:
+            if os.path.isfile(script_path):
+                os.remove(script_path)
+        self._publish_ready(run_id, binary_path)
+
+    # ------------------------------------------------------------------
+    # Strategy: GDB (Linux/macOS)
+    # ------------------------------------------------------------------
+    def _run_gdb(self, binary_path: str, run_id: str):
+        if not _PYGDBMI_AVAILABLE:
+            logger.warning("pygdbmi is not installed. Install it for dynamic tracing.")
+            self._publish_ready(run_id, binary_path)
             return
 
         gdb_path = get_config().get("tools", {}).get("gdb_path") or "gdb"
         if not shutil.which(gdb_path):
-            print(f"[DynamicAgent] GDB not found at '{gdb_path}'. Skipping dynamic trace.")
-            if self.bus is not None:
-                self.bus.publish("DYNAMIC_TRACE_READY", {"run_id": run_id, "binary": binary_path})
-            return
-
-        if platform.system() == "Windows":
-            print("[DynamicAgent] GDB-based tracing is not supported natively on Windows. Skipping.")
-            if self.bus is not None:
-                self.bus.publish("DYNAMIC_TRACE_READY", {"run_id": run_id, "binary": binary_path})
+            logger.warning("GDB not found at '%s'. Skipping dynamic trace.", gdb_path)
+            self._publish_ready(run_id, binary_path)
             return
 
         bb_addrs = self.g.fetch_all_basic_blocks()
@@ -136,8 +373,7 @@ class DynamicAgent:
                 except Exception:
                     pass
 
-        if self.bus is not None:
-            self.bus.publish("DYNAMIC_TRACE_READY", {"run_id": run_id, "binary": binary_path})
+        self._publish_ready(run_id, binary_path)
 
     def _send_cmd(self, gdbmi, cmd: str):
         gdbmi.write(cmd)

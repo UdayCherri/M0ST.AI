@@ -35,6 +35,9 @@ class NodeType(Enum):
     INSTRUCTION = auto()
     VARIABLE = auto()
     STRUCT = auto()
+    STRING = auto()
+    IMPORT = auto()
+    EMBEDDING = auto()
 
 
 class EdgeType(Enum):
@@ -42,6 +45,10 @@ class EdgeType(Enum):
     CFG_FLOW = auto()
     DATA_FLOW = auto()
     TYPE_RELATION = auto()
+    USES_STRING = auto()
+    IMPORTS = auto()
+    TYPE_OF = auto()
+    SIMILAR_TO = auto()
 
 
 # ── PKG Implementation ────────────────────────────────────────────────────
@@ -61,12 +68,19 @@ class ProgramKnowledgeGraph:
         self._instructions: Dict[int, Dict[str, Any]] = {}
         self._variables: Dict[str, Dict[str, Any]] = {}  # key = unique id
         self._structs: Dict[str, Dict[str, Any]] = {}    # key = struct name
+        self._strings: Dict[str, Dict[str, Any]] = {}    # key = address or unique id
+        self._imports: Dict[str, Dict[str, Any]] = {}    # key = import name
+        self._embeddings: Dict[str, Dict[str, Any]] = {}  # key = entity id
 
         # ── Edge stores ────────────────────────────────────────────────
         self._call_edges: Set[Tuple[int, int]] = set()
         self._cfg_flow_edges: Set[Tuple[int, int]] = set()
         self._data_flow_edges: List[Dict[str, Any]] = []
         self._type_relations: List[Dict[str, Any]] = []
+        self._uses_string_edges: List[Tuple[str, str]] = []   # (func/insn id, string id)
+        self._imports_edges: List[Tuple[str, str]] = []        # (func id, import name)
+        self._type_of_edges: List[Tuple[str, str]] = []        # (entity id, type name)
+        self._similar_to_edges: List[Dict[str, Any]] = []      # {src, dst, score}
 
         # ── Relationship indexes ───────────────────────────────────────
         self._func_to_blocks: Dict[int, Set[int]] = defaultdict(set)
@@ -183,6 +197,48 @@ class ProgramKnowledgeGraph:
         return list(self._structs.values())
 
     # ════════════════════════════════════════════════════════════════════
+    # String nodes
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_string(self, string_id: str, value: str, addr: Optional[int] = None,
+                   encoding: str = "utf-8", **props):
+        self._strings[string_id] = {
+            "id": string_id, "value": value, "addr": addr,
+            "encoding": encoding, **props,
+        }
+
+    def get_string(self, string_id: str) -> Optional[Dict[str, Any]]:
+        return self._strings.get(string_id)
+
+    def fetch_strings(self) -> List[Dict]:
+        return list(self._strings.values())
+
+    def search_strings(self, pattern: str) -> List[Dict]:
+        import re as _re
+        try:
+            rx = _re.compile(pattern, _re.IGNORECASE)
+        except _re.error:
+            return []
+        return [s for s in self._strings.values() if rx.search(s.get("value", ""))]
+
+    # ════════════════════════════════════════════════════════════════════
+    # Import nodes
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_import(self, name: str, library: str = "", ordinal: Optional[int] = None,
+                   addr: Optional[int] = None, **props):
+        self._imports[name] = {
+            "name": name, "library": library, "ordinal": ordinal,
+            "addr": addr, **props,
+        }
+
+    def get_import(self, name: str) -> Optional[Dict[str, Any]]:
+        return self._imports.get(name)
+
+    def fetch_imports(self) -> List[Dict]:
+        return sorted(self._imports.values(), key=lambda i: i.get("name", ""))
+
+    # ════════════════════════════════════════════════════════════════════
     # CALL edges
     # ════════════════════════════════════════════════════════════════════
 
@@ -249,6 +305,74 @@ class ProgramKnowledgeGraph:
         if entity is None:
             return list(self._type_relations)
         return [r for r in self._type_relations if r["entity"] == entity]
+
+    # ════════════════════════════════════════════════════════════════════
+    # USES_STRING edges
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_uses_string(self, entity_id: str, string_id: str):
+        self._uses_string_edges.append((entity_id, string_id))
+
+    def fetch_uses_string(self, entity_id: Optional[str] = None) -> List[Tuple[str, str]]:
+        if entity_id is None:
+            return list(self._uses_string_edges)
+        return [(e, s) for e, s in self._uses_string_edges if e == entity_id]
+
+    # ════════════════════════════════════════════════════════════════════
+    # IMPORTS edges
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_imports_edge(self, func_id: str, import_name: str):
+        self._imports_edges.append((func_id, import_name))
+
+    def fetch_imports_edges(self, func_id: Optional[str] = None) -> List[Tuple[str, str]]:
+        if func_id is None:
+            return list(self._imports_edges)
+        return [(f, i) for f, i in self._imports_edges if f == func_id]
+
+    # ════════════════════════════════════════════════════════════════════
+    # TYPE_OF edges
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_type_of(self, entity_id: str, type_name: str):
+        self._type_of_edges.append((entity_id, type_name))
+
+    def fetch_type_of(self, entity_id: Optional[str] = None) -> List[Tuple[str, str]]:
+        if entity_id is None:
+            return list(self._type_of_edges)
+        return [(e, t) for e, t in self._type_of_edges if e == entity_id]
+
+    # ════════════════════════════════════════════════════════════════════
+    # Embedding nodes
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_embedding(self, entity_id: str, vector: List[float],
+                      model: str = "gnn", **props):
+        self._embeddings[entity_id] = {
+            "entity_id": entity_id, "vector": vector,
+            "model": model, "dim": len(vector), **props,
+        }
+
+    def get_embedding(self, entity_id: str) -> Optional[Dict[str, Any]]:
+        return self._embeddings.get(entity_id)
+
+    def fetch_embeddings(self) -> List[Dict]:
+        return list(self._embeddings.values())
+
+    # ════════════════════════════════════════════════════════════════════
+    # SIMILAR_TO edges
+    # ════════════════════════════════════════════════════════════════════
+
+    def add_similar_to(self, src: str, dst: str, score: float, **props):
+        self._similar_to_edges.append({
+            "src": src, "dst": dst, "score": score, **props,
+        })
+
+    def fetch_similar_to(self, entity_id: Optional[str] = None) -> List[Dict]:
+        if entity_id is None:
+            return list(self._similar_to_edges)
+        return [e for e in self._similar_to_edges
+                if e["src"] == entity_id or e["dst"] == entity_id]
 
     # ════════════════════════════════════════════════════════════════════
     # Heuristics / Properties (backward compat with old MemoryGraphStore)
@@ -362,10 +486,17 @@ class ProgramKnowledgeGraph:
         self._instructions.clear()
         self._variables.clear()
         self._structs.clear()
+        self._strings.clear()
+        self._imports.clear()
+        self._embeddings.clear()
         self._call_edges.clear()
         self._cfg_flow_edges.clear()
         self._data_flow_edges.clear()
         self._type_relations.clear()
+        self._uses_string_edges.clear()
+        self._imports_edges.clear()
+        self._type_of_edges.clear()
+        self._similar_to_edges.clear()
         self._func_to_blocks.clear()
         self._block_to_insns.clear()
         self._runs.clear()
@@ -387,10 +518,17 @@ class ProgramKnowledgeGraph:
             "instructions": len(self._instructions),
             "variables": len(self._variables),
             "structs": len(self._structs),
+            "strings": len(self._strings),
+            "imports": len(self._imports),
+            "embeddings": len(self._embeddings),
             "call_edges": len(self._call_edges),
             "cfg_flow_edges": len(self._cfg_flow_edges),
             "data_flow_edges": len(self._data_flow_edges),
             "type_relations": len(self._type_relations),
+            "uses_string_edges": len(self._uses_string_edges),
+            "imports_edges": len(self._imports_edges),
+            "type_of_edges": len(self._type_of_edges),
+            "similar_to_edges": len(self._similar_to_edges),
         }
 
     def export_json(self) -> Dict[str, Any]:
@@ -400,10 +538,17 @@ class ProgramKnowledgeGraph:
             "basic_blocks": {f"0x{a:x}": d for a, d in self._basic_blocks.items()},
             "variables": self._variables,
             "structs": self._structs,
+            "strings": self._strings,
+            "imports": self._imports,
             "call_edges": [{"src": s, "dst": d} for s, d in self._call_edges],
             "cfg_flow_edges": [{"src": s, "dst": d} for s, d in self._cfg_flow_edges],
             "data_flow_edges": self._data_flow_edges,
             "type_relations": self._type_relations,
+            "uses_string_edges": [{"entity": e, "string": s} for e, s in self._uses_string_edges],
+            "imports_edges": [{"func": f, "import": i} for f, i in self._imports_edges],
+            "type_of_edges": [{"entity": e, "type": t} for e, t in self._type_of_edges],
+            "embeddings": self._embeddings,
+            "similar_to_edges": self._similar_to_edges,
             "summary": self.summary(),
         }
 

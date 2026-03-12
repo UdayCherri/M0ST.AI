@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-M0ST — AI-Driven Multi-Agent Reverse Engineering Framework.
+M0ST — AI Security System.
 
 Architecture (7 layers):
   1. Interface         — CLI, API, command handlers

@@ -104,6 +104,37 @@ class GraphAgent:
         result = self.analyse_function(func_addr)
         return result.get("graph_embedding_b64", "")
 
+    def find_similar(self, func_addr: int, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Find structurally similar functions by cosine similarity of graph embeddings."""
+        target = self.analyse_function(func_addr)
+        target_emb = target.get("graph_embedding", [])
+        if not target_emb or all(v == 0.0 for v in target_emb):
+            return []
+
+        all_results = self.analyse_all_functions()
+        similarities = []
+        for addr, result in all_results.items():
+            if addr == func_addr:
+                continue
+            emb = result.get("graph_embedding", [])
+            if not emb or len(emb) != len(target_emb):
+                continue
+            sim = self._cosine_similarity(target_emb, emb)
+            similarities.append({"addr": addr, "similarity": round(sim, 4),
+                                 "node_count": result.get("node_count", 0),
+                                 "edge_count": result.get("edge_count", 0)})
+        similarities.sort(key=lambda x: x["similarity"], reverse=True)
+        return similarities[:top_k]
+
+    @staticmethod
+    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        mag_a = math.sqrt(sum(x * x for x in a))
+        mag_b = math.sqrt(sum(x * x for x in b))
+        if mag_a == 0 or mag_b == 0:
+            return 0.0
+        return dot / (mag_a * mag_b)
+
     def _build_graph_data(self, func_addr: int, blocks: List[int], edges: List[Tuple[int, int]]):
         block_to_idx = {bb: i for i, bb in enumerate(blocks)}
         node_features = []

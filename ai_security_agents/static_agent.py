@@ -22,6 +22,51 @@ except ImportError:
     _R2_AVAILABLE = False
 
 
+# ── ESIL detection and instruction normalization ───────────────────────
+
+def _is_esil(text: str) -> bool:
+    """Detect whether a string is an ESIL expression rather than assembly."""
+    if not text:
+        return False
+    # ESIL uses stack-based operators like =[8], -=, $z, $$, etc.
+    esil_indicators = ("=[", "-=", "+=", "$z", "$$", ",=", "DUP", "PICK")
+    return any(tok in text for tok in esil_indicators)
+
+
+def _normalize_instruction(insn: dict):
+    """
+    Extract a clean (mnemonic, operands) pair from a radare2 instruction dict.
+
+    Priority:
+    1. Use 'disasm' or 'opcode' field (full assembly string)
+    2. Use 'mnemonic' + 'op_str' fields
+    3. Never fall back to ESIL
+
+    Returns (mnemonic, operands_list) or (None, []) if unusable.
+    """
+    # Strategy 1: parse full disassembly string (most reliable)
+    for field in ("disasm", "opcode"):
+        full = insn.get(field)
+        if isinstance(full, str) and full.strip() and not _is_esil(full):
+            parts = full.strip().split(None, 1)
+            mnemonic = parts[0]
+            operands = []
+            if len(parts) > 1:
+                operands = [o.strip() for o in parts[1].split(",") if o.strip()]
+            return mnemonic, operands
+
+    # Strategy 2: use structured mnemonic + op_str fields
+    mnemonic = insn.get("mnemonic")
+    if mnemonic:
+        op_str = insn.get("op_str") or ""
+        if isinstance(op_str, str) and _is_esil(op_str):
+            op_str = ""  # discard ESIL operands
+        operands = [o.strip() for o in op_str.split(",") if o.strip()] if op_str else []
+        return mnemonic, operands
+
+    return None, []
+
+
 class StaticAgent:
     """
     Disassembles a binary and builds the program graph.
@@ -35,7 +80,7 @@ class StaticAgent:
         self.bus = bus if bus is not None else type("NullBus", (), {"publish": lambda *a, **k: None})()
         self._last_structured_output: Optional[Dict[str, Any]] = None
 
-    def run(self, binary_path: str):
+    def run(self, binary_path: str, verbose: bool = True):
         if not _R2_AVAILABLE:
             print("[StaticAgent] r2pipe is not installed. Install radare2 and r2pipe to enable static analysis.")
             print("[StaticAgent] Skipping static analysis.")
@@ -133,8 +178,12 @@ class StaticAgent:
 
         try:
             radare2home = _resolve_radare2home()
+            # Pre-load flags suppress startup INFO/WARN before any cmd() can be sent
+            r2_flags = ["-e", "bin.relocs.apply=true", "-e", "bin.cache=true"]
+            if not verbose:
+                r2_flags += ["-e", "log.level=0", "-e", "bin.verbose=false"]
             try:
-                r2 = r2pipe.open(binary_path, radare2home=radare2home)
+                r2 = r2pipe.open(binary_path, flags=r2_flags, radare2home=radare2home)
             except FileNotFoundError:
                 print("[StaticAgent] Error: radare2 not found.")
                 if os.name == "nt":
@@ -146,8 +195,6 @@ class StaticAgent:
                 self.bus.publish("STATIC_ANALYSIS_COMPLETE", {"function_count": 0})
                 return
 
-            safe_cmd(r2, "e bin.relocs.apply=true")
-            safe_cmd(r2, "e bin.cache=true")
             safe_cmd(r2, "aaa")
 
             functions = safe_cmdj(r2, "aflj")
@@ -237,18 +284,9 @@ class StaticAgent:
                         if insn_addr < bb_addr or insn_addr >= bb_addr + bb_size:
                             continue
 
-                        mnemonic = insn.get("mnemonic")
-                        if not mnemonic:
-                            opcode = insn.get("opcode") or insn.get("disasm") or ""
-                            if isinstance(opcode, str) and opcode.strip():
-                                mnemonic = opcode.strip().split()[0]
+                        mnemonic, operands = _normalize_instruction(insn)
                         if not mnemonic:
                             continue
-
-                        operands = []
-                        op_str = insn.get("op_str") or insn.get("esil")
-                        if isinstance(op_str, str) and op_str.strip():
-                            operands = [o.strip() for o in op_str.split(",") if o.strip()]
 
                         self.g.create_instruction(bb_addr, insn_addr, mnemonic, operands)
                         insn_count += 1

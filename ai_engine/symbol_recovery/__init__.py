@@ -21,10 +21,51 @@ class SymbolRecoveryEngine:
         3. LLM reasoning as fallback for complex cases
     """
 
-    def __init__(self, graph_store, embedding_engine=None, llm_engine=None):
+    def __init__(self, graph_store, embedding_engine=None, llm_engine=None,
+                 symbol_db=None):
         self.g = graph_store
         self.embeddings = embedding_engine
         self.llm = llm_engine
+        self.symbol_db = symbol_db
+
+    # ── Batch Recovery ─────────────────────────────────────────────────────
+
+    def recover_all(self) -> Dict[int, Dict[str, Any]]:
+        """Run symbol recovery for all functions and persist results."""
+        results = {}
+        for func in self.g.fetch_functions():
+            addr = func.get("addr")
+            if addr is None:
+                continue
+            name_result = self.predict_function_name(addr)
+            var_result = self.recover_variable_names(addr)
+            type_result = self.infer_argument_types(addr)
+
+            results[addr] = {
+                "name": name_result,
+                "variables": var_result,
+                "types": type_result,
+            }
+
+            # Persist to symbol database if available
+            if self.symbol_db:
+                self.symbol_db.add_function_name(
+                    addr,
+                    name_result.get("name", f"sub_{addr:x}"),
+                    confidence=name_result.get("confidence", 0.0),
+                    source=name_result.get("source", "unknown"),
+                )
+                for var in var_result:
+                    var_id = f"{addr:x}_{var.get('original', '')}"
+                    self.symbol_db.add_variable_name(
+                        var_id,
+                        var.get("suggested", var.get("original", "")),
+                        var_type=var.get("type_hint", "unknown"),
+                        confidence=0.5,
+                        source="symbol_recovery",
+                    )
+
+        return results
 
     # ── Function Name Prediction ───────────────────────────────────────────
 

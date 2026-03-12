@@ -116,42 +116,64 @@ class MasterAgent:
 
     # ── Legacy pipeline (backward compatible) ──────────────────────────
 
-    def run_pipeline(self, binary_path: str):
+    def run_pipeline(self, binary_path: str, verbose: bool = False):
         """
         Run the analysis pipeline. Uses sequential execution
         instead of the old event bus.
         """
-        print("[Master] Clearing previous graph state...")
+        import io as _io
+        import logging as _logging
+        import contextlib as _ctx
+
+        def _log(msg: str):
+            if verbose:
+                print(msg)
+
+        def _quiet_context():
+            """Suppress stdout when not verbose (hides agent print calls)."""
+            if verbose:
+                return _ctx.nullcontext()
+            return _ctx.redirect_stdout(_io.StringIO())
+
+        # Silence Python loggers when not verbose (suppresses agent warnings)
+        if not verbose:
+            _logging.getLogger("m0st").setLevel(_logging.ERROR)
+        else:
+            _logging.getLogger("m0st").setLevel(_logging.DEBUG)
+
+        _log("[Master] Clearing previous graph state...")
         self.graph_store.clear_graph()
 
-        print("[Master] Launching static analysis...")
+        _log("[Master] Launching static analysis...")
         if enforce_capability(self.static_agent, Capability.STATIC_WRITE):
-            self.static_agent.run(binary_path)
+            with _quiet_context():
+                self.static_agent.run(binary_path, verbose=verbose)
 
-        print("[Master] Running heuristics...")
+        _log("[Master] Running heuristics...")
         if enforce_capability(self.heuristics_agent, Capability.STATIC_READ):
             self.heuristics_agent.run()
 
-        print("[Master] Verifying static contradictions...")
+        _log("[Master] Verifying static contradictions...")
         if enforce_capability(self.verifier_agent, Capability.VERIFY):
             self.verifier_agent.verify_basicblock_edges()
 
-        print("[Master] Running GNN analysis...")
+        _log("[Master] Running GNN analysis...")
         try:
             self.graph_agent.analyse_all_functions()
         except Exception as e:
-            print(f"[Master] GNN analysis skipped: {e}")
+            _log(f"[Master] GNN analysis skipped: {e}")
 
-        print("[Master] Starting dynamic tracing...")
+        _log("[Master] Starting dynamic tracing...")
         run_id = f"run_{int(time.time())}"
         if enforce_capability(self.dynamic_agent, Capability.DYNAMIC_EXECUTE):
-            self.dynamic_agent.run(binary_path, run_id=run_id)
+            with _quiet_context():
+                self.dynamic_agent.run(binary_path, run_id=run_id)
 
-        print("[Master] Verifying runtime edges...")
+        _log("[Master] Verifying runtime edges...")
         if enforce_capability(self.verifier_agent, Capability.VERIFY):
             self.verifier_agent.verify_basicblock_edges()
 
-        print("[Master] Running plugins...")
+        _log("[Master] Running plugins...")
         if enforce_capability(self.plugins, Capability.PLUGIN_ANALYSIS):
             self.plugins.load_plugins()
             for func in self.graph_store.fetch_functions():
@@ -160,28 +182,92 @@ class MasterAgent:
                     continue
                 self.plugins.run_all(self.graph_store, addr)
 
-        print("[Master] Generating semantic explanations...")
+        _log("[Master] Generating semantic explanations...")
         semantic_results = {}
         funcs = self.graph_store.fetch_functions()
         total = len(funcs)
+
+        if not verbose and total > 0:
+            import threading as _threading
+
+            _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            _spinner_state = {"done": False, "current": 0, "frame": 0}
+
+            def _spin():
+                import time as _time
+                while not _spinner_state["done"]:
+                    frame = _SPINNER_FRAMES[_spinner_state["frame"] % len(_SPINNER_FRAMES)]
+                    cur = _spinner_state["current"]
+                    msg = f"\r[Master] Analyzing functions {frame} {cur}/{total} "
+                    print(msg, end="", flush=True)
+                    _spinner_state["frame"] += 1
+                    _time.sleep(0.08)
+
+            _spin_thread = _threading.Thread(target=_spin, daemon=True)
+            _spin_thread.start()
+
         for i, func in enumerate(funcs, 1):
             addr = func.get("addr")
             if addr is None:
                 continue
             name = func.get("name", f"sub_{addr:x}")
-            print(f"  [{i}/{total}] Explaining {name} @ 0x{addr:x}...")
+            if not verbose:
+                _spinner_state["current"] = i
+            else:
+                print(f"  [{i}/{total}] Explaining {name} @ 0x{addr:x}...")
             try:
                 semantic_results[addr] = self.semantic_agent.explain(addr)
             except Exception:
-                semantic_results[addr] = self.semantic_agent_legacy.explain_function(addr)
+                try:
+                    semantic_results[addr] = self.semantic_agent_legacy.explain_function(addr)
+                except Exception:
+                    pass
+
+        if not verbose and total > 0:
+            _spinner_state["done"] = True
+            _spin_thread.join()
+            print(f"\r[Master] Analyzing functions  done. ({total} function(s))   ")
         self.graph_store.set_semantic_summaries(semantic_results)
 
-        print("[Master] Creating snapshot...")
+        _log("[Master] Creating snapshot...")
         snapshot_name = f"snapshot_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         if enforce_capability(self.snapshots, Capability.SNAPSHOT):
-            self.snapshots.create_snapshot(snapshot_name, description="Pipeline snapshot")
+            try:
+                self.snapshots.create_snapshot(snapshot_name, description="Pipeline snapshot")
+            except Exception as e:
+                _log(f"[Master] Snapshot creation skipped: {e}")
 
-        print("[Master] Pipeline complete.")
+        # ── Security intelligence modules ──────────────────────────────
+        _log("[Master] Running exploitability analysis...")
+        try:
+            from security_modules.ai_assisted_binary_analysis.vulnerability_detection import VulnerabilityDetector
+            from security_modules.ai_assisted_binary_analysis.exploitability_analysis import ExploitabilityAnalyzer
+            vd = VulnerabilityDetector()
+            ea = ExploitabilityAnalyzer(self.graph_store)
+            for func in self.graph_store.fetch_functions():
+                addr = func.get("addr")
+                if addr is not None:
+                    vuln_result = vd.detect_vulnerabilities(self.graph_store, addr)
+                    vulns = vuln_result.get("vulnerabilities", [])
+                    if vulns:
+                        ea.analyze(vulns)
+        except Exception as e:
+            print(f"[Master] Exploitability analysis skipped: {e}")
+
+        _log("[Master] Running unsafe pattern detection...")
+        try:
+            from security_modules.ai_assisted_binary_analysis.unsafe_pattern_detection import UnsafePatternDetector
+            upd = UnsafePatternDetector(self.graph_store)
+            for func in self.graph_store.fetch_functions():
+                addr = func.get("addr")
+                if addr is not None:
+                    upd.detect(self.graph_store, addr)
+        except Exception as e:
+            print(f"[Master] Unsafe pattern detection skipped: {e}")
+
+        # Summary line always prints
+        func_count = len(self.graph_store.fetch_functions())
+        print(f"[Master] Pipeline complete. {func_count} function(s) analyzed.")
 
     # ── AI-driven pipeline ─────────────────────────────────────────────
 

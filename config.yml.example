@@ -11,6 +11,13 @@ tools:
   r2_path: ""
   gdb_path: ""
   ghidra_path: ""        # path to Ghidra analyzeHeadless script (optional)
+  windbg_path: ""        # path to cdb.exe for Windows dynamic tracing (optional)
+  x64dbg_path: ""        # path to x64dbg.exe for Windows tracing (optional)
+
+# Dynamic analysis configuration
+dynamic:
+  strategy: ""            # auto | gdb | docker | windbg | x64dbg (empty = auto-detect)
+  docker_image: "m0st/gdb-trace:latest"  # Docker image for container-based tracing
 
 pipeline:
   event_timeout_seconds: 10.0

@@ -1,10 +1,17 @@
 """
 Dataset pipeline — collects training data from analysis runs for fine-tuning
 GNN and LLM models (Step 9 of M0ST architecture).
+
+Includes:
+  - DatasetPipeline: collects samples from analysis runs
+  - SourceCompiler: compiles open-source C/C++ projects with/without debug info
+  - TrainingDataGenerator: pairs stripped binary functions with source ground truth
 """
 
 import json
 import os
+import subprocess
+import shutil
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -134,3 +141,159 @@ class DatasetPipeline:
         else:
             for key in self._datasets:
                 self._datasets[key] = []
+
+
+class SourceCompiler:
+    """
+    Compiles open-source C/C++ projects twice: with and without debug symbols.
+
+    Produces a (debug_binary, stripped_binary) pair for each project so that
+    TrainingDataGenerator can extract ground-truth function names and types
+    from the debug build and pair them with the stripped binary.
+    """
+
+    DEFAULT_CFLAGS_DEBUG = ["-g", "-O0"]
+    DEFAULT_CFLAGS_STRIPPED = ["-O2", "-s"]
+
+    def __init__(self, output_dir: str = "data/binaries/compiled"):
+        self._output_dir = output_dir
+
+    def compile_project(
+        self,
+        source_dir: str,
+        project_name: str,
+        compiler: str = "gcc",
+        extra_flags: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Compile a C/C++ project with and without debug info.
+
+        Returns dict with 'debug' and 'stripped' binary paths, or None on failure.
+        """
+        if not os.path.isdir(source_dir):
+            return None
+
+        project_out = os.path.join(self._output_dir, project_name)
+        os.makedirs(project_out, exist_ok=True)
+
+        debug_bin = os.path.join(project_out, f"{project_name}_debug")
+        stripped_bin = os.path.join(project_out, f"{project_name}_stripped")
+
+        sources = self._collect_sources(source_dir)
+        if not sources:
+            return None
+
+        base_flags = extra_flags or []
+
+        # Debug build
+        if not self._run_compile(compiler, sources, debug_bin,
+                                 base_flags + self.DEFAULT_CFLAGS_DEBUG):
+            return None
+
+        # Stripped build
+        if not self._run_compile(compiler, sources, stripped_bin,
+                                 base_flags + self.DEFAULT_CFLAGS_STRIPPED):
+            return None
+
+        return {"debug": debug_bin, "stripped": stripped_bin}
+
+    def _collect_sources(self, directory: str) -> List[str]:
+        """Collect .c and .cpp files from a directory tree."""
+        sources = []
+        for root, _dirs, files in os.walk(directory):
+            for f in files:
+                if f.endswith((".c", ".cpp", ".cc")):
+                    sources.append(os.path.join(root, f))
+        return sources
+
+    @staticmethod
+    def _run_compile(compiler: str, sources: List[str], output: str,
+                     flags: List[str]) -> bool:
+        cmd = [compiler] + flags + sources + ["-o", output]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
+
+class TrainingDataGenerator:
+    """
+    Pairs stripped binary functions with source-level ground truth extracted
+    from debug builds.
+
+    Workflow:
+      1. Use radare2 on the debug binary to extract symbol → address mapping.
+      2. Use radare2 on the stripped binary to extract function boundaries.
+      3. Match by code bytes / address offsets.
+      4. Emit training pairs: (stripped_function_bytes, ground_truth_name, ground_truth_type).
+    """
+
+    def __init__(self, pipeline: Optional[DatasetPipeline] = None):
+        self._pipeline = pipeline
+
+    def generate_pairs(
+        self,
+        debug_binary: str,
+        stripped_binary: str,
+        binary_sha256: str = "",
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract training pairs from a debug/stripped binary pair.
+
+        Returns list of dicts with keys:
+          address, ground_truth_name, function_size, binary
+        """
+        debug_symbols = self._extract_symbols(debug_binary)
+        stripped_functions = self._extract_functions(stripped_binary)
+        if not debug_symbols or not stripped_functions:
+            return []
+
+        pairs = []
+        for func in stripped_functions:
+            addr = func.get("offset")
+            size = func.get("size", 0)
+            gt = debug_symbols.get(addr)
+            if gt and not gt.startswith("sub_") and not gt.startswith("fcn."):
+                pair = {
+                    "address": addr,
+                    "ground_truth_name": gt,
+                    "function_size": size,
+                    "binary": binary_sha256,
+                }
+                pairs.append(pair)
+                if self._pipeline:
+                    self._pipeline.add_symbol_ground_truth(
+                        binary_sha256=binary_sha256,
+                        address=hex(addr),
+                        predicted_name="",
+                        ground_truth_name=gt,
+                        correct=False,
+                    )
+        return pairs
+
+    @staticmethod
+    def _extract_symbols(binary_path: str) -> Dict[int, str]:
+        """Use r2 to extract symbol names from a debug binary."""
+        try:
+            import r2pipe
+            r2 = r2pipe.open(binary_path, flags=["-2"])
+            symbols = r2.cmdj("isj") or []
+            r2.quit()
+            return {s["vaddr"]: s["name"] for s in symbols
+                    if s.get("vaddr") and s.get("name")}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_functions(binary_path: str) -> List[Dict]:
+        """Use r2 to extract function list from a stripped binary."""
+        try:
+            import r2pipe
+            r2 = r2pipe.open(binary_path, flags=["-2"])
+            r2.cmd("aaa")
+            funcs = r2.cmdj("aflj") or []
+            r2.quit()
+            return funcs
+        except Exception:
+            return []

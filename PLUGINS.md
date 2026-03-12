@@ -1,8 +1,22 @@
 # M0ST — Plugin Development Guide
 
+> **See also:** [TECHNOLOGIES.md](TECHNOLOGIES.md#11-plugin-system) \u2014 Plugin System technology overview
+
 ## Overview
 
 M0ST supports **dynamically loaded analysis plugins**. Plugins are Python files that expose an `analyze()` function. They are automatically discovered and loaded from the `plugins/` directory. When a Program Knowledge Graph (PKG) is attached, plugin results are stored as PKG annotations.
+
+Plugins are run automatically during the pipeline (via `plugins run <addr>` or automatically in `load`) and can also be invoked manually from the CLI.
+
+---
+
+## CLI Commands
+
+```
+m0st> plugins list              # Show all loaded plugins
+m0st> plugins run 0x401000      # Run all plugins on a single function
+m0st> plugins run all           # Run all plugins on all functions
+```
 
 ---
 

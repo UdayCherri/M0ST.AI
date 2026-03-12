@@ -1,3 +1,4 @@
+import difflib
 import os
 import platform
 import shlex
@@ -6,6 +7,54 @@ import traceback
 
 from core import load_env
 from core.config import get_config
+
+# All known CLI commands for autocomplete and suggestions
+_ALL_COMMANDS = [
+    "load", "list funcs", "info", "blocks", "insns", "edges",
+    "explain", "pseudocode", "verify", "trace", "complexity",
+    "export", "plugins", "snapshot", "status", "config",
+    "ai ask", "ai pipeline",
+    "find callers", "find callees", "find imports", "find strings", "find recursion",
+    "show callgraph", "show dataflow",
+    "similar", "clear", "entropy", "verbose",
+    "help", "exit", "quit",
+]
+
+
+def _setup_readline():
+    """Enable tab-completion via readline (or pyreadline3 on Windows)."""
+    try:
+        if platform.system() == "Windows":
+            import pyreadline3  # noqa: F401
+        import readline
+
+        def _completer(text, state):
+            text_lower = text.lower()
+            line = readline.get_line_buffer().lstrip().lower()
+            # If the line already has content, match multi-word commands
+            matches = [c for c in _ALL_COMMANDS if c.startswith(line)]
+            # Fall back to prefix matching
+            if not matches:
+                matches = [c for c in _ALL_COMMANDS if c.startswith(text_lower)]
+            if state < len(matches):
+                # Return only the part after what's already typed
+                return matches[state] + " "
+            return None
+
+        readline.set_completer(_completer)
+        readline.set_completer_delims("")
+        readline.parse_and_bind("tab: complete")
+    except (ImportError, Exception):
+        pass  # Readline not available — tab completion disabled silently
+
+
+def _suggest_command(cmd: str) -> str:
+    """Return a 'did you mean?' suggestion for a mistyped command."""
+    first_words = list({c.split()[0] for c in _ALL_COMMANDS})
+    close = difflib.get_close_matches(cmd, first_words, n=1, cutoff=0.6)
+    if close:
+        return f"Unknown command: '{cmd}'. Did you mean '{close[0]}'? Type 'help' for usage."
+    return f"Unknown command: '{cmd}'. Type 'help' for usage."
 
 
 def _parse_addr(text: str) -> int:
@@ -27,50 +76,98 @@ def _safe_shlex_split(line: str):
 def _print_banner():
     print()
     print("=" * 60)
-    print("   M0ST — AI-Driven Reverse Engineering Framework")
+    print("   M0ST - AI Security System.")
     print(f"   Platform: {platform.system()} {platform.machine()}")
     print("   Version:  2.0.0")
     print("=" * 60)
     print()
 
 
-def _print_help():
+def _print_module_menu():
+    print("  Select a module:\n")
+    print("    [1] Reverse Engineering")
+    print("    [2] Binary Analysis")
+    print("    [3] Network Traffic Analysis")
+    print()
+    print("    [0] Full Mode (all modules)")
+    print()
+
+
+def _print_help(page: str = ""):
+    pages = {
+        "general": (
+            "\n  General Commands:\n"
+            "  load <binary>              Load and analyze a binary\n"
+            "  list funcs                 List discovered functions\n"
+            "  info <func_addr>           Show function properties\n"
+            "  blocks <func_addr>         List basic blocks in a function\n"
+            "  insns <bb_addr>            List instructions in a basic block\n"
+            "  edges <func_addr>          Show CFG edges for a function\n"
+            "  explain <func_addr>        Semantic summary (medium detail)\n"
+            "  explain simple <addr>      Brief summary\n"
+            "  explain deep <addr>        Detailed summary with vulns\n"
+            "  pseudocode <func_addr>     Generate C-like pseudocode\n"
+            "  verify                     Run verifier on current graph\n"
+            "  trace                      Re-run dynamic trace on loaded binary\n"
+            "  complexity [func_addr]     Show cyclomatic complexity metrics\n"
+            "  export <path>              Export analysis to JSON report\n"
+            "  clear                      Clear graph and start fresh\n"
+        ),
+        "ai": (
+            "\n  AI Commands:\n"
+            "  ai name <addr>             LLM-based function naming\n"
+            "  ai explain <addr>          LLM-based function summary\n"
+            "  ai types <addr>            LLM-based type inference\n"
+            "  ai refine <addr>           Integrated GNN + LLM analysis\n"
+            "  ai full                    Full multi-agent AI analysis\n"
+            "  ai vulns <addr>            LLM-based vulnerability detection\n"
+            "  ai annotate <addr>         LLM-based code annotation\n"
+            "  ai ask <question>          Free-form AI analyst query\n"
+        ),
+        "graph": (
+            "\n  Graph Intelligence:\n"
+            "  find callers <func_addr>   Find callers of a function\n"
+            "  find callees <func_addr>   Find callees of a function\n"
+            "  find imports <name>        Search imports by name\n"
+            "  find strings <pattern>     Search strings by pattern\n"
+            "  find recursion             Detect recursive functions\n"
+            "  show callgraph             Display call graph summary\n"
+            "  show dataflow <var>        Show data flow for a variable\n"
+            "  similar <func_addr>        Find similar functions by embedding\n"
+        ),
+        "management": (
+            "\n  Management:\n"
+            "  plugins list               Show loaded plugins\n"
+            "  plugins run <func_addr>    Run plugins on a function\n"
+            "  snapshot save <name>       Save analysis snapshot\n"
+            "  snapshot list              List snapshots\n"
+            "  snapshot show <name>       Show snapshot details\n"
+            "  snapshot diff <a> <b>      Diff two snapshots\n"
+            "  status                     Show tool/service availability\n"
+            "  config                     Show current configuration\n"
+            "  verbose on|off             Toggle verbose output\n"
+        ),
+    }
+
+    page = page.strip().lower()
+    if page in pages:
+        print(pages[page])
+        return
+
+    if page == "all":
+        for section in pages.values():
+            print(section)
+        return
+
+    # Show index
     print(
-        "\nCommands:\n"
-        "  load <binary>              Load and analyze a binary\n"
-        "  list funcs                 List discovered functions\n"
-        "  info <func_addr>           Show function properties\n"
-        "  blocks <func_addr>         List basic blocks in a function\n"
-        "  insns <bb_addr>            List instructions in a basic block\n"
-        "  edges <func_addr>          Show CFG edges for a function\n"
-        "  explain <func_addr>        Semantic summary (medium detail)\n"
-        "  explain simple <addr>      Brief summary\n"
-        "  explain deep <addr>        Detailed summary with vulns\n"
-        "  pseudocode <func_addr>     Generate C-like pseudocode\n"
-        "  verify                     Run verifier on current graph\n"
-        "  trace                      Re-run dynamic trace on loaded binary\n"
-        "  complexity [func_addr]     Show cyclomatic complexity metrics\n"
-        "  export <path>              Export analysis to JSON report\n"
-        "  plugins list               Show loaded plugins\n"
-        "  plugins run <func_addr>    Run plugins on a function\n"
-        "  snapshot save <name>       Save analysis snapshot\n"
-        "  snapshot list              List snapshots\n"
-        "  snapshot show <name>       Show snapshot details\n"
-        "  snapshot diff <a> <b>      Diff two snapshots\n"
-        "  status                     Show tool/service availability\n"
-        "  config                     Show current configuration\n"
-        "  clear                      Clear graph and start fresh\n"
-        "\n"
-        "  AI Commands:\n"
-        "  ai name <addr>             LLM-based function naming\n"
-        "  ai explain <addr>          LLM-based function summary\n"
-        "  ai types <addr>            LLM-based type inference\n"
-        "  ai refine <addr>           Integrated GNN + LLM analysis\n"
-        "  ai full                    Full multi-agent AI analysis\n"
-        "  ai vulns <addr>            LLM-based vulnerability detection\n"
-        "  ai annotate <addr>         LLM-based code annotation\n"
-        "\n"
-        "  help                       Show this help\n"
+        "\n  Help Pages (type 'help <page>'):\n"
+        "    help general      General analysis commands\n"
+        "    help ai           AI-powered commands\n"
+        "    help graph        Graph intelligence commands\n"
+        "    help management   Plugins, snapshots, config\n"
+        "    help all          Show all commands\n"
+        "\n  help                       Show this index\n"
         "  quit / exit                Exit M0ST\n"
     )
 
@@ -170,9 +267,10 @@ def _cmd_load(args, master, state):
         print(f"File not found: {path}")
         return
     state["binary"] = path
+    verbose = state.get("verbose", False)
     print(f"[M0ST] Running pipeline for {path}...")
     try:
-        master.run_pipeline(path)
+        master.run_pipeline(path, verbose=verbose)
     except Exception as e:
         print(f"[M0ST] Pipeline error: {e}")
 
@@ -405,7 +503,7 @@ def _cmd_trace(master, state):
         return
     print(f"[M0ST] Re-tracing {binary}...")
     try:
-        master.run_pipeline(binary)
+        master.run_pipeline(binary, verbose=state.get("verbose", False))
     except Exception as e:
         print(f"[M0ST] Trace error: {e}")
 
@@ -641,10 +739,59 @@ def _cmd_ai(args, master, state):
             "  ai full            Full multi-agent AI analysis\n"
             "  ai vulns <addr>    LLM-based vulnerability detection\n"
             "  ai annotate <addr> LLM-based code annotation\n"
+            "  ai ask <question>  Free-form AI analyst query\n"
         )
         return
 
     subcmd = args[0].lower()
+
+    # ai ask — free-form query
+    if subcmd == "ask":
+        if len(args) < 2:
+            print("Usage: ai ask <question>")
+            return
+        question = " ".join(args[1:])
+    elif subcmd in ("explain", "name", "types", "refine", "vulns", "annotate") and len(args) >= 2:
+        # If the second word doesn't look like an address, treat the whole thing as a free-form ask
+        try:
+            _parse_addr(args[1])
+        except Exception:
+            # Not a valid address — route to free-form ask
+            question = " ".join(args)
+            subcmd = "ask"
+    
+    if subcmd == "ask":
+        if "question" not in dir():
+            # Came directly via `ai ask <words>`
+            if len(args) < 2:
+                print("Usage: ai ask <question>")
+                return
+            question = " ".join(args[1:])
+        print(f"[M0ST] Processing query: {question}")
+        try:
+            result = master.semantic_agent.ask(question)
+            answer = result.get("answer", "No answer available.")
+            # Unwrap if LLM returned a JSON-formatted answer string
+            if isinstance(answer, str):
+                try:
+                    parsed = _json.loads(answer)
+                    if isinstance(parsed, dict):
+                        answer = (parsed.get("answer") or parsed.get("text")
+                                  or parsed.get("response") or parsed.get("result")
+                                  or answer)
+                except (ValueError, TypeError):
+                    pass
+            print(f"\n{answer}")
+            ctx_funcs = result.get("context_functions", [])
+            if ctx_funcs:
+                print("\n  Referenced functions:")
+                for cf in ctx_funcs:
+                    if isinstance(cf, dict):
+                        print(f"    {cf.get('addr', '?')}: {cf.get('name', '?')} ({cf.get('relation', '')})")
+        except Exception as e:
+            print(f"[M0ST] Error: {e}")
+        print()
+        return
 
     # ai full — full pipeline
     if subcmd == "full":
@@ -782,6 +929,204 @@ def _cmd_ai(args, master, state):
 
 
 # ─────────────────────────────────────────────────────────────
+# Graph intelligence commands
+# ─────────────────────────────────────────────────────────────
+
+
+def _cmd_find(args, graph):
+    """Handle 'find callers/callees/imports/strings/recursion' commands."""
+    if not args:
+        print("Usage: find callers <addr> | find callees <addr> | find imports <name>\n"
+              "       find strings <pattern> | find recursion")
+        return
+
+    subcmd = args[0].lower()
+
+    if subcmd == "imports":
+        if len(args) < 2:
+            print("Usage: find imports <name_pattern>")
+            return
+        pattern = args[1]
+        imports = graph.fetch_imports() if hasattr(graph, "fetch_imports") else []
+        if not imports:
+            print("  No imports loaded.")
+            return
+        matches = [i for i in imports
+                   if isinstance(i, dict) and pattern.lower() in i.get("name", "").lower()]
+        if not matches:
+            print(f"  No imports matching '{pattern}'.")
+            return
+        print(f"\n  Imports matching '{pattern}':")
+        for imp in matches:
+            lib = imp.get("library", "")
+            lib_str = f" ({lib})" if lib else ""
+            print(f"    {imp.get('name', '?')}{lib_str}")
+        print()
+        return
+
+    if subcmd == "strings":
+        if len(args) < 2:
+            print("Usage: find strings <pattern>")
+            return
+        pattern = args[1]
+        if hasattr(graph, "search_strings"):
+            matches = graph.search_strings(pattern)
+        else:
+            all_strings = graph.fetch_strings() if hasattr(graph, "fetch_strings") else []
+            matches = [s for s in all_strings
+                       if isinstance(s, dict) and pattern.lower() in s.get("value", "").lower()]
+        if not matches:
+            print(f"  No strings matching '{pattern}'.")
+            return
+        print(f"\n  Strings matching '{pattern}':")
+        for s in matches[:50]:
+            val = s.get("value", "?") if isinstance(s, dict) else str(s)
+            addr = s.get("addr", "") if isinstance(s, dict) else ""
+            addr_str = f" @ 0x{addr:x}" if isinstance(addr, int) else ""
+            # Truncate long strings for display
+            display_val = val[:80] + "..." if len(val) > 80 else val
+            print(f"    {display_val}{addr_str}")
+        if len(matches) > 50:
+            print(f"    ... and {len(matches) - 50} more")
+        print()
+        return
+
+    if subcmd == "recursion":
+        call_edges = graph.fetch_call_edges() if hasattr(graph, "fetch_call_edges") else []
+        funcs = graph.fetch_functions()
+        name_map = {f.get("addr"): f.get("name", "???") for f in funcs}
+        recursive = []
+        for src, dst in call_edges:
+            if src == dst:
+                recursive.append(src)
+        # Also find mutual recursion (A->B, B->A)
+        edge_set = set(call_edges)
+        mutual = []
+        for src, dst in call_edges:
+            if src != dst and (dst, src) in edge_set:
+                pair = tuple(sorted([src, dst]))
+                if pair not in mutual:
+                    mutual.append(pair)
+        if not recursive and not mutual:
+            print("  No recursive functions detected.")
+            return
+        if recursive:
+            print("\n  Direct recursion:")
+            for addr in recursive:
+                print(f"    0x{addr:x}  {name_map.get(addr, '???')}")
+        if mutual:
+            print("\n  Mutual recursion:")
+            for a, b in mutual:
+                print(f"    0x{a:x} ({name_map.get(a, '???')}) <-> 0x{b:x} ({name_map.get(b, '???')})")
+        print()
+        return
+
+    if subcmd in ("callers", "callees"):
+        if len(args) < 2:
+            print(f"Usage: find {subcmd} <func_addr>")
+            return
+        try:
+            addr = _parse_addr(args[1])
+        except Exception:
+            print("Invalid function address.")
+            return
+
+        if subcmd == "callers":
+            results = graph.fetch_callers(addr) if hasattr(graph, "fetch_callers") else []
+            label = "Callers"
+        else:
+            results = graph.fetch_callees(addr) if hasattr(graph, "fetch_callees") else []
+            label = "Callees"
+
+        if not results:
+            print(f"  No {label.lower()} found for 0x{addr:x}.")
+            return
+        funcs = graph.fetch_functions()
+        name_map = {f.get("addr"): f.get("name", "???") for f in funcs}
+        print(f"\n  {label} of 0x{addr:x}:")
+        for c in results:
+            print(f"    0x{c:x}  {name_map.get(c, '???')}")
+        print()
+        return
+
+    print("Usage: find callers <addr> | find callees <addr> | find imports <name>\n"
+          "       find strings <pattern> | find recursion")
+
+
+def _cmd_show(args, graph):
+    """Handle 'show callgraph/dataflow' commands."""
+    if not args:
+        print("Usage: show callgraph | show dataflow <variable>")
+        return
+
+    subcmd = args[0].lower()
+
+    if subcmd == "callgraph":
+        edges = graph.fetch_call_edges() if hasattr(graph, "fetch_call_edges") else []
+        funcs = graph.fetch_functions()
+        name_map = {f.get("addr"): f.get("name", "???") for f in funcs}
+
+        if not edges:
+            print("  No call graph edges. Load a binary first.")
+            return
+
+        print(f"\n  Call Graph ({len(edges)} edges):")
+        for src, dst in edges[:50]:
+            src_name = name_map.get(src, f"0x{src:x}")
+            dst_name = name_map.get(dst, f"0x{dst:x}")
+            print(f"    {src_name} -> {dst_name}")
+        if len(edges) > 50:
+            print(f"    ... and {len(edges) - 50} more edges")
+        print()
+
+    elif subcmd == "dataflow":
+        if len(args) < 2:
+            print("Usage: show dataflow <variable_or_entity_id>")
+            return
+        entity_id = args[1]
+        flows = graph.fetch_data_flows(entity_id) if hasattr(graph, "fetch_data_flows") else []
+        if not flows:
+            print(f"  No data flow edges for '{entity_id}'.")
+            return
+        print(f"\n  Data flows involving '{entity_id}':")
+        for flow in flows[:30]:
+            print(f"    {flow.get('src', '?')} --[{flow.get('type', '?')}]--> {flow.get('dst', '?')}")
+        print()
+
+    else:
+        print("Usage: show callgraph | show dataflow <variable>")
+
+
+def _cmd_similar(args, master):
+    """Find functions similar to a given function by embedding."""
+    if not args:
+        print("Usage: similar <func_addr>")
+        return
+    try:
+        addr = _parse_addr(args[0])
+    except Exception:
+        print("Invalid function address.")
+        return
+
+    graph = master.graph_store
+    funcs = graph.fetch_functions()
+    name_map = {f.get("addr"): f.get("name", "???") for f in funcs}
+
+    # Try using the graph agent's embedding engine
+    try:
+        similar = master.graph_agent.find_similar(addr)
+        if not similar:
+            print(f"  No similar functions found for 0x{addr:x}.")
+            return
+        print(f"\n  Functions similar to 0x{addr:x} ({name_map.get(addr, '???')}):")
+        for s_addr, score in similar:
+            print(f"    0x{s_addr:x}  {name_map.get(s_addr, '???')}  (similarity: {score:.3f})")
+        print()
+    except Exception as e:
+        print(f"  Error computing similarity: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
 # Main REPL
 # ─────────────────────────────────────────────────────────────
 
@@ -789,6 +1134,22 @@ def _cmd_ai(args, master, state):
 def main():
     load_env()
     _print_banner()
+
+    # ── Module selection ──────────────────────────────────────────
+    _print_module_menu()
+    module_choice = ""
+    while module_choice not in {"0", "1", "2", "3"}:
+        try:
+            module_choice = input("  m0st [module]> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if module_choice not in {"0", "1", "2", "3"}:
+            print("  Invalid choice. Enter 0, 1, 2, or 3.")
+
+    _MODULE_NAMES = {"0": "Full Mode", "1": "Reverse Engineering", "2": "Binary Analysis", "3": "Network Traffic Analysis"}
+    selected_module = _MODULE_NAMES[module_choice]
+    print(f"\n[M0ST] Module: {selected_module}\n")
 
     # Check tool availability upfront
     print("[M0ST] Checking environment...")
@@ -810,10 +1171,14 @@ def main():
     cgen = master.pseudocode_agent
     snapshots = master.snapshots
 
-    state = {"binary": None}
+    # Verbose defaults to off — user can toggle with 'verbose on/off'
+    state = {"binary": None, "verbose": False, "module": selected_module}
 
     # Handle initial load from command-line args (skip flags)
     positional = [a for a in sys.argv[1:] if not a.startswith("-")]
+    verbose_flag = "--verbose" in sys.argv or "-v" in sys.argv
+    if verbose_flag:
+        state["verbose"] = True
     if positional:
         initial_path = positional[0]
         abs_path = os.path.abspath(initial_path)
@@ -821,13 +1186,15 @@ def main():
             state["binary"] = abs_path
             print(f"[M0ST] Running pipeline for {abs_path}...")
             try:
-                master.run_pipeline(abs_path)
+                master.run_pipeline(abs_path, verbose=state["verbose"])
             except Exception as e:
                 print(f"[M0ST] Pipeline error: {e}")
         else:
             print(f"[M0ST] Warning: file not found: {abs_path}")
 
     print("Type 'help' for commands.\n")
+
+    _setup_readline()
 
     while True:
         try:
@@ -840,9 +1207,6 @@ def main():
             continue
         if line in {"exit", "quit"}:
             break
-        if line == "help":
-            _print_help()
-            continue
 
         parts = _safe_shlex_split(line)
         if not parts:
@@ -850,6 +1214,21 @@ def main():
 
         cmd = parts[0].lower()
         args = parts[1:]
+
+        # ── help [page] ──────────────────────────────────
+        if cmd == "help":
+            _print_help(" ".join(args) if args else "")
+            continue
+
+        # ── verbose on/off ───────────────────────────────
+        if cmd == "verbose":
+            if args and args[0].lower() in ("on", "off"):
+                state["verbose"] = args[0].lower() == "on"
+                print(f"[M0ST] Verbose mode: {'ON' if state['verbose'] else 'OFF'}")
+            else:
+                print(f"  Verbose mode is {'ON' if state['verbose'] else 'OFF'}")
+                print("  Usage: verbose on | verbose off")
+            continue
 
         try:
             # ── load ─────────────────────────────────────
@@ -937,6 +1316,21 @@ def main():
                 _cmd_ai(args, master, state)
                 continue
 
+            # ── find callers/callees ─────────────────────
+            if cmd == "find" and args:
+                _cmd_find(args, graph)
+                continue
+
+            # ── show callgraph/dataflow ──────────────────
+            if cmd == "show" and args:
+                _cmd_show(args, graph)
+                continue
+
+            # ── similar <func_addr> ─────────────────────
+            if cmd == "similar":
+                _cmd_similar(args, master)
+                continue
+
             # ── clear ────────────────────────────────────
             if cmd == "clear":
                 try:
@@ -952,7 +1346,7 @@ def main():
                 _cmd_plugins(["run"] + args, master, graph)
                 continue
 
-            print(f"Unknown command: '{cmd}'. Type 'help' for usage.")
+            print(_suggest_command(cmd))
 
         except Exception as e:
             print(f"[M0ST] Command error: {e}")
