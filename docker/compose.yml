@@ -1,20 +1,73 @@
-version: "3.9"
+# =============================================================================
+# M0ST — Docker Compose
+#
+# Usage:
+#   docker compose up -d              # start in background
+#   docker compose exec m0st python main.py   # open interactive CLI
+#   docker compose run --rm m0st python main.py path/to/binary
+#   docker compose --profile gdb-trace build   # also build the trace sandbox
+# =============================================================================
 
 services:
-  spider:
+
+  # ── Main analysis container ────────────────────────────────────────────────
+  m0st:
     build:
       context: ..
       dockerfile: docker/backend.Dockerfile
+      args:
+        R2_BRANCH: master   # pin a tag like "5.9.8" for reproducible builds
+    image: m0st:latest
+
+    # Pass LLM keys and config overrides from the host .env file.
+    # Copy .env.example → .env and fill in your values before starting.
+    env_file:
+      - path: ../.env
+        required: false     # fall back gracefully if .env is absent
+
     environment:
-      # LLM config (set your provider + key here)
-      LLM_PROVIDER: "none"
+      # These override .env values when set here.
+      # Uncomment and fill in to hard-code inside compose (not recommended
+      # for credentials — prefer the .env file instead).
+      #
+      # LLM_PROVIDER: openai
+      # LLM_MODEL: gpt-4o-mini
       # OPENAI_API_KEY: ""
       # ANTHROPIC_API_KEY: ""
+      # MISTRAL_API_KEY: ""
+      # LLM_BASE_URL: ""
+      #
+      # Dynamic analysis strategy inside the container (gdb is available)
+      DYNAMIC_STRATEGY: gdb
+
     volumes:
-      - ../tests/binaries:/app/binaries:ro
-      - spider_data:/app/storage
-    stdin_open: true
+      # Persistent SQLite database and snapshots
+      - m0st_storage:/app/storage
+
+      # Mount a local folder of binaries for analysis
+      # Uncomment and set the path on the left side:
+      # - ./samples:/app/data/binaries:ro
+
+      # Mount a custom config.yml (takes precedence over env-var generation)
+      # - ../config.yml:/app/config.yml:ro
+
+    stdin_open: true          # required for interactive CLI
     tty: true
 
+    restart: unless-stopped
+
+  # ── GDB trace sandbox ─────────────────────────────────────────────────────
+  # Isolated execution environment for Docker-strategy dynamic analysis.
+  # Built separately (--profile gdb-trace) to avoid pulling it unnecessarily.
+  gdb-trace:
+    profiles: [gdb-trace]
+    build:
+      context: ..
+      dockerfile: docker/gdb-trace.Dockerfile
+    image: m0st/gdb-trace:latest
+    # This service is not started directly; DynamicAgent spawns containers
+    # from this image on demand via `docker run --rm`.
+
 volumes:
-  spider_data:
+  m0st_storage:
+    driver: local
