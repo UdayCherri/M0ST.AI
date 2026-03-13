@@ -3,6 +3,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from typing import Dict, List, Optional, Tuple
 
 from core.capabilities import Capability
@@ -62,6 +63,26 @@ def _docker_daemon_available() -> bool:
         return False
 
 
+def _detect_fallback_strategy() -> str:
+    """Pick a non-docker dynamic strategy when docker is unavailable/fails."""
+    cfg = get_config()
+
+    if platform.system() == "Windows":
+        windbg_path = cfg.get("tools", {}).get("windbg_path") or ""
+        if windbg_path and shutil.which(windbg_path):
+            return STRATEGY_WINDBG
+
+        x64dbg_path = cfg.get("tools", {}).get("x64dbg_path") or ""
+        if x64dbg_path and os.path.isfile(x64dbg_path):
+            return STRATEGY_X64DBG
+
+    gdb_path = cfg.get("tools", {}).get("gdb_path") or "gdb"
+    if _PYGDBMI_AVAILABLE and shutil.which(gdb_path):
+        return STRATEGY_GDB
+
+    return ""
+
+
 class DynamicAgent:
     """
     Executes the binary in a controlled environment.
@@ -96,21 +117,48 @@ class DynamicAgent:
         # Ask user permission for Docker (it launches containers)
         if strategy == STRATEGY_DOCKER:
             try:
-                answer = input(
-                    "[DynamicAgent] Docker-based tracing will run the binary "
-                    "inside a container. Proceed? [y/N] "
-                ).strip().lower()
+                # Use stderr so prompt remains visible even in quiet mode.
+                print(
+                    "[DynamicAgent] Use Docker for dynamic analysis? [y/N] ",
+                    file=sys.stderr,
+                    end="",
+                    flush=True,
+                )
+                answer = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
                 answer = ""
             if answer not in ("y", "yes"):
-                print("[DynamicAgent] Docker tracing skipped by user.")
+                print("[DynamicAgent] Docker tracing skipped by user.", file=sys.stderr)
+                self._publish_ready(run_id, binary_path)
+                return
+            if self._run_docker(binary_path, run_id, publish_ready=False):
                 self._publish_ready(run_id, binary_path)
                 return
 
+            fallback = _detect_fallback_strategy()
+            if fallback:
+                print(
+                    f"[DynamicAgent] Docker unavailable/failed. Falling back to '{fallback}'.",
+                    file=sys.stderr,
+                )
+                if fallback == STRATEGY_GDB:
+                    self._run_gdb(binary_path, run_id)
+                elif fallback == STRATEGY_WINDBG:
+                    self._run_windbg(binary_path, run_id)
+                elif fallback == STRATEGY_X64DBG:
+                    self._run_x64dbg(binary_path, run_id)
+                else:
+                    self._publish_ready(run_id, binary_path)
+            else:
+                print(
+                    "[DynamicAgent] Docker unavailable/failed and no fallback backend found. Skipping dynamic trace.",
+                    file=sys.stderr,
+                )
+                self._publish_ready(run_id, binary_path)
+            return
+
         if strategy == STRATEGY_GDB:
             self._run_gdb(binary_path, run_id)
-        elif strategy == STRATEGY_DOCKER:
-            self._run_docker(binary_path, run_id)
         elif strategy == STRATEGY_WINDBG:
             self._run_windbg(binary_path, run_id)
         elif strategy == STRATEGY_X64DBG:
@@ -127,7 +175,7 @@ class DynamicAgent:
     # ------------------------------------------------------------------
     # Strategy: Docker (platform-independent)
     # ------------------------------------------------------------------
-    def _run_docker(self, binary_path: str, run_id: str):
+    def _run_docker(self, binary_path: str, run_id: str, publish_ready: bool = True) -> bool:
         """Run GDB tracing inside a Docker container (Linux image)."""
         cfg = get_config()
         image = cfg.get("dynamic", {}).get("docker_image", "m0st/gdb-trace:latest")
@@ -143,6 +191,7 @@ class DynamicAgent:
             "/work/" + bin_name,
         ]
         logger.info("Docker trace: %s", " ".join(cmd))
+        ok = False
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120
@@ -151,11 +200,14 @@ class DynamicAgent:
                 logger.error("Docker trace failed:\n%s", result.stderr[:500])
             else:
                 self._parse_docker_output(result.stdout, run_id)
+                ok = True
         except FileNotFoundError:
             logger.error("Docker not found on PATH.")
         except subprocess.TimeoutExpired:
             logger.error("Docker trace timed out.")
-        self._publish_ready(run_id, binary_path)
+        if publish_ready:
+            self._publish_ready(run_id, binary_path)
+        return ok
 
     def _parse_docker_output(self, stdout: str, run_id: str):
         """Parse JSON lines from the docker trace container."""

@@ -1,6 +1,67 @@
+# ── Virtual environments ────────────────────────────────────────────────────
 wsl-enve/
 .venv/
 venv/
+env/
+
+# ── Python bytecode ─────────────────────────────────────────────────────────
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Version control ─────────────────────────────────────────────────────────
 .git/
+.gitignore
+.gitattributes
+
+# ── Secrets & local config (never bake into image) ──────────────────────────
+.env
+.env.*
+config.yml
+
+# ── Databases & persistent state ────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+storage/
+snapshots/
+
+# ── Binary test data (large; mount at runtime instead) ──────────────────────
+data/binaries/
+data/analysis_results/
+data/datasets/
+tests/binaries/
+tests/notebooks/
+
+# ── Documentation & tooling (not needed in image) ───────────────────────────
 node_modules/
+*.md
+docs/
+.vscode/
+.idea/
+
+# ── Logs & reports ───────────────────────────────────────────────────────────
+*.log
+reports/
+output/
+
+# ── Caches ───────────────────────────────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage/
+
+# ── OS noise ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Keep Docker runtime files available in build context ────────────────────
+!docker/*.Dockerfile
+!docker/entrypoint.sh
+!docker/trace_runner.py
+
