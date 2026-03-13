@@ -26,10 +26,7 @@ Target domains include:
 - **Reverse engineering** — automated binary analysis, function recovery, decompilation
 - **Binary analysis** — vulnerability detection, malware classification, risk scoring
 - **Malware analysis** — behavioral analysis, indicator extraction, family classification
-- **Network traffic analysis** — PCAP inspection, protocol analysis, anomaly detection
-- **Reconnaissance** — attack surface mapping, asset discovery
-- **Threat intelligence** — indicator correlation, threat graph construction
-- **Incident investigation** — evidence collection, timeline reconstruction
+
 
 ---
 
