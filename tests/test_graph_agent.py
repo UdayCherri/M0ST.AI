@@ -79,6 +79,12 @@ class TestGraphAgent(unittest.TestCase):
         e2 = self.agent.get_graph_embedding_for_llm(0x1000)
         self.assertEqual(e1, e2)
 
+    def test_feature_schema_dimension(self):
+        """Live CFG features match the dataset schema dimension."""
+        result = self.agent.analyse_function(0x1000)
+        self.assertEqual(self.agent._node_feature_dim, 18)
+        self.assertEqual(len(result["node_embeddings"][0]), self.agent.embedding_dim)
+
 
 class TestGraphAgentEmptyGraph(unittest.TestCase):
     """Edge-case tests with an empty graph."""

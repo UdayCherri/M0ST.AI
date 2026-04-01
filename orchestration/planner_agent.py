@@ -152,6 +152,159 @@ class PlannerAgent:
 
         return result
 
+    # ── Default Pipeline (Automatic on binary load) ─────────────────────────
+
+    def run_default_pipeline(self, binary_path: str) -> AnalysisResult:
+        """
+        Execute the default pipeline: disassembly → CFG recovery → 
+        call graph → program knowledge graph → snapshot.
+        
+        This is the minimal pipeline required before any analysis can proceed.
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": binary_path, "stages": []}
+
+        print("[Planner] Starting default pipeline...")
+
+        self._run_stage("static_analysis", result, binary_path)
+        self._run_stage("call_graph_building", result, binary_path)
+        self._run_stage("snapshot", result, binary_path)
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] Default pipeline complete in {result.total_time_seconds:.1f}s. "
+              f"{result.total_functions} function(s) loaded.")
+
+        return result
+
+    # ── On-Demand Pipelines ────────────────────────────────────────────────
+
+    def run_gnn_pipeline(self, binary_path: Optional[str] = None) -> AnalysisResult:
+        """
+        On-demand pipeline: GNN embeddings + CFG similarity analysis.
+        
+        Requires: binary already loaded (static_analysis complete).
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path or self._memory.get("binary_path", "unknown"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": result.binary_path, "stages": []}
+
+        print("[Planner] Running GNN embedding pipeline...")
+
+        self._run_stage("gnn_analysis", result, binary_path or "")
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] GNN pipeline complete in {result.total_time_seconds:.1f}s.")
+
+        return result
+
+    def run_vulnerability_pipeline(self, binary_path: Optional[str] = None) -> AnalysisResult:
+        """
+        On-demand pipeline: LLM-based vulnerability detection and analysis.
+        
+        Requires: binary already loaded (static_analysis complete).
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path or self._memory.get("binary_path", "unknown"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": result.binary_path, "stages": []}
+
+        print("[Planner] Running vulnerability detection pipeline...")
+
+        self._run_stage("pseudocode_extraction", result, binary_path or "")
+        self._run_stage("llm_analysis", result, binary_path or "")
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] Vulnerability pipeline complete in {result.total_time_seconds:.1f}s.")
+
+        return result
+
+    def run_dynamic_pipeline(self, binary_path: str) -> AnalysisResult:
+        """
+        On-demand pipeline: Runtime tracing and dynamic analysis.
+        
+        Traces binary execution to collect runtime information.
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": binary_path, "stages": []}
+
+        print("[Planner] Running dynamic analysis pipeline...")
+
+        self._run_stage("dynamic_analysis", result, binary_path)
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] Dynamic pipeline complete in {result.total_time_seconds:.1f}s.")
+
+        return result
+
+    def run_symbolic_pipeline(self, binary_path: Optional[str] = None) -> AnalysisResult:
+        """
+        On-demand pipeline: Z3-based symbolic constraint solving.
+        
+        Performs automated verification and infeasible edge pruning.
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path or self._memory.get("binary_path", "unknown"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": result.binary_path, "stages": []}
+
+        print("[Planner] Running symbolic analysis pipeline...")
+
+        self._run_stage("z3_analysis", result, binary_path or "")
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] Symbolic pipeline complete in {result.total_time_seconds:.1f}s.")
+
+        return result
+
+    def run_plugin_pipeline(self, binary_path: Optional[str] = None) -> AnalysisResult:
+        """
+        On-demand pipeline: Plugin-based analysis suite.
+        
+        Runs all active security plugins (anti-debug, crypto, entropy, etc.).
+        """
+        start = time.monotonic()
+        result = AnalysisResult(
+            binary_path=binary_path or self._memory.get("binary_path", "unknown"),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        self._memory = {"binary_path": result.binary_path, "stages": []}
+
+        print("[Planner] Running plugin analysis pipeline...")
+
+        self._run_stage("plugin_analysis", result, binary_path or "")
+
+        result.total_functions = len(self.g.fetch_functions())
+        result.total_time_seconds = time.monotonic() - start
+
+        print(f"[Planner] Plugin pipeline complete in {result.total_time_seconds:.1f}s.")
+
+        return result
+
     # ── Individual stage runners ───────────────────────────────────────────
 
     def _run_stage(self, stage_name: str, result: AnalysisResult, binary_path: str):

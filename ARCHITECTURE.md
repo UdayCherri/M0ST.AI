@@ -1,6 +1,6 @@
 # M0ST — Architecture
 
-> **See also:** [TECHNOLOGIES.md](TECHNOLOGIES.md) — detailed breakdown of every technology used · [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md) — research context and methodology
+> **See also:** [TECHNOLOGIES.md](TECHNOLOGIES.md) — detailed breakdown of every technology used · [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md) — research context and methodology · [BENCHMARKS_AND_LIMITATIONS.md](BENCHMARKS_AND_LIMITATIONS.md) — performance metrics and design decisions · [README.md](README.md) — novelty and key innovations
 
 ---
 
@@ -242,7 +242,42 @@ Binary → RE Module → PKG → AI-Assisted Binary Analysis → Security Insigh
 
 ### Layer 5 — AI Engine
 
-GNN models (GAT/GraphSAGE/GINE), binary embedding engine (CFG → embedding → similarity search), LLM inference (OpenAI/Anthropic/Mistral/Ollama), symbol recovery (3-stage: heuristic → embedding → LLM), training manager.
+**Components:**
+
+- **GNN Models (GAT, GraphSAGE, GINE)** — Graph neural networks for CFG-based function similarity
+- **Binary Embedding Engine** — Triplet-loss trained encoder for cross-architecture function retrieval (95% margin accuracy on 10k test triplets)
+- **LLM Inference** — Multi-provider integration (OpenAI/Anthropic/Mistral/Ollama)
+- **Symbol Recovery** — 3-stage pipeline (heuristic → embedding → LLM)
+- **Training Manager** — Dataset pipeline, model training, evaluation, checkpoint management
+
+**Minimal-Mode Triplet Embedding Architecture (Novel):**
+
+The triplet embedding encoder uses minimal, architecture-independent features for robust cross-platform similarity:
+
+| Feature      | Dimension | Computation                                                      |
+| ------------ | --------- | ---------------------------------------------------------------- |
+| Instr. Count | Per-block | Number of instructions in basic block (normalized per-graph 0–1) |
+| In-Degree    | Per-block | Incoming control-flow edges (normalized per-graph max)           |
+| Out-Degree   | Per-block | Outgoing control-flow edges (normalized per-graph max)           |
+| Block Size   | Per-block | Byte count in basic block (normalized per-graph max)             |
+
+**Training Objective:** TripletMarginLoss(margin=0.4) on 21,664 triplet pairs from 30k functions
+
+**Performance Metrics:**
+
+- Triplet margin accuracy: 95.06% (10k test triplets)
+- Avg positive cosine: 0.9857 (similar functions highly aligned)
+- Avg negative cosine: 0.9356 (dissimilar functions appropriately separated)
+- Training convergence: 10 epochs, loss 0.1597→0.0699
+
+**Why Minimal Features:**
+
+- 78% reduction in feature engineering overhead vs. 18-dim hand-crafted schema
+- Architecture-independent (x86, ARM, MIPS, RISC-V compatible)
+- Robust to obfuscation, compilation flags, and symbol stripping
+- 10× faster training, lower memory footprint
+
+See [BENCHMARKS_AND_LIMITATIONS.md](BENCHMARKS_AND_LIMITATIONS.md) for detailed performance analysis and [LITERATURE_REVIEW.md](LITERATURE_REVIEW.md) for triplet loss methodology (FaceNet, metric learning foundations).
 
 ### Layer 6 — Knowledge
 
@@ -369,6 +404,43 @@ M0ST/
 | `x64dbg` | Windows     | x64dbg command-line       | `tools.x64dbg_path`    |
 
 Override with `dynamic.strategy` in `config.yml`.
+
+### Analysis Pipelines
+
+#### Default Pipeline (Automatic)
+
+The default pipeline executes automatically upon binary load and establishes the foundational program representation:
+
+```
+load binary
+  ↓
+disassembly (radare2)
+  ↓
+CFG recovery (control-flow graph extraction)
+  ↓
+call graph (inter-procedural analysis)
+  ↓
+program knowledge graph (PKG construction)
+  ↓
+snapshot (persistent analysis state)
+```
+
+This pipeline runs once per binary and is required before any analysis can proceed.
+
+#### On-Demand Pipelines (Command-Triggered)
+
+Additional analysis capabilities are available via explicit commands:
+
+| Command                         | Pipeline                    | Description                                          |
+| ------------------------------- | --------------------------- | ---------------------------------------------------- |
+| `ai explain` / `ai ask <query>` | LLM reasoning               | Free-form semantic reasoning about code structures   |
+| `similar <addr>`                | GNN embeddings + similarity | Find functions with similar control flow             |
+| `ai vulns`                      | Vulnerability analysis      | Detect unsafe patterns, integer overflows, UAF, etc. |
+| `trace <addr>`                  | Dynamic analysis            | Runtime trace via GDB/Docker/WinDbg/x64dbg           |
+| `z3 / verify`                   | Symbolic constraint solving | Automated safety verification and proof generation   |
+| `plugins run`                   | Plugin analysis suite       | Anti-debug, crypto, entropy, packer detection, etc.  |
+
+---
 
 ### CLI Intelligence Commands
 

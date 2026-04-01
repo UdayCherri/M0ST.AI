@@ -48,6 +48,42 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Dataset and ML artifacts
+data/datasets/cache/
+data/datasets/graphs/
+data/datasets/raw_graphs/
+data/datasets/compiled/
+data/datasets/stripped/
+data/datasets/pairs/
+data/datasets/metadata/*.json
+data/datasets/external/
+data/datasets/binaries/
+data/datasets/source_code/
+data/datasets/synthetic/
+ai_engine/gnn_models/checkpoints/*.pt
+ai_engine/gnn_models/checkpoints/*.json
+
+# Docker build artifacts
+docker-compose.override.yml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_local
+
+# Research notes (keep public only)
+.research/
+*.local.md
+
+# Temporary analysis outputs
+*.analysis.json
+*.disasm
+*.trace
+*.snapshot
+
 # Analysis output
 output/
 reports/
+
+# Local runner scripts
+_run_*.py
+_smoke_*.py

@@ -68,7 +68,7 @@ class BinaryEmbeddingEngine:
         self.embedding_dim = embedding_dim
         self.device = device
         self.model = None
-        self._node_feature_dim = _NUM_OPCODE_CATS + 8
+        self._node_feature_dim = _NUM_OPCODE_CATS + 6
 
         if _TORCH_AVAILABLE and _gnn_available():
             try:
@@ -141,7 +141,19 @@ class BinaryEmbeddingEngine:
     def _build_graph_data(self, func_addr: int, blocks: List[int],
                           edges: List[Tuple[int, int]]):
         block_to_idx = {bb: i for i, bb in enumerate(blocks)}
-        node_features = [self._compute_block_features(bb, blocks, edges) for bb in blocks]
+        loop_depths = self._estimate_loop_depths(blocks, edges)
+        in_degree = {bb: 0 for bb in blocks}
+        out_degree = {bb: 0 for bb in blocks}
+        for src, dst in edges:
+            if src in out_degree:
+                out_degree[src] += 1
+            if dst in in_degree:
+                in_degree[dst] += 1
+
+        node_features = [
+            self._compute_block_features(bb, edges, in_degree, out_degree, loop_depths)
+            for bb in blocks
+        ]
 
         src_list, dst_list = [], []
         for s, d in edges:
@@ -158,41 +170,99 @@ class BinaryEmbeddingEngine:
             return {"x": node_features, "edge_index": [src_list, dst_list],
                     "num_nodes": len(blocks)}
 
-    def _compute_block_features(self, bb_addr: int, all_blocks: List[int],
-                                all_edges: List[Tuple[int, int]]) -> List[float]:
+    def _compute_block_features(
+        self,
+        bb_addr: int,
+        all_edges: List[Tuple[int, int]],
+        in_degree: Dict[int, int],
+        out_degree: Dict[int, int],
+        loop_depths: Dict[int, int],
+    ) -> List[float]:
         insns = self.g.fetch_block_instructions(bb_addr)
         hist = [0.0] * _NUM_OPCODE_CATS
-        has_call = has_branch = False
+        call_count = 0
+        branch_count = 0
 
         for insn in insns:
             mnem = (insn.get("mnemonic") or "").lower()
             cat = _OPCODE_CATEGORIES.get(mnem, 11)
             hist[cat] += 1.0
-            if cat == 7:
-                has_call = True
-            if cat == 6:
-                has_branch = True
+            if mnem.startswith("call") or mnem in {"bl", "blr"}:
+                call_count += 1
+            if (mnem.startswith("j") and mnem not in {"jmp"}) or mnem in {"jmp", "b", "beq", "bne"}:
+                branch_count += 1
 
         total = sum(hist)
         if total > 0:
             hist = [h / total for h in hist]
 
-        in_degree = sum(1 for _, d in all_edges if d == bb_addr)
-        out_degree = sum(1 for s, _ in all_edges if s == bb_addr)
-        is_entry = 1.0 if bb_addr == min(all_blocks) else 0.0
-        is_exit = 1.0 if out_degree == 0 else 0.0
-        log_addr = math.log2(bb_addr + 1) / 64.0 if bb_addr > 0 else 0.0
-
         structural = [
-            min(len(insns) / 50.0, 1.0),
-            min(in_degree / 10.0, 1.0),
-            min(out_degree / 10.0, 1.0),
-            is_entry, is_exit,
-            1.0 if has_call else 0.0,
-            1.0 if has_branch else 0.0,
-            log_addr,
+            float(len(insns)),
+            float(in_degree.get(bb_addr, 0)),
+            float(out_degree.get(bb_addr, 0)),
+            float(call_count),
+            float(branch_count),
+            float(loop_depths.get(bb_addr, 0)),
         ]
         return hist + structural
+
+    @staticmethod
+    def _estimate_loop_depths(
+        blocks: List[int],
+        edges: List[Tuple[int, int]],
+    ) -> Dict[int, int]:
+        adjacency: Dict[int, List[int]] = {bb: [] for bb in blocks}
+        reverse_adjacency: Dict[int, List[int]] = {bb: [] for bb in blocks}
+        self_loops: Dict[int, bool] = {bb: False for bb in blocks}
+
+        for src, dst in edges:
+            if src not in adjacency or dst not in adjacency:
+                continue
+            adjacency[src].append(dst)
+            reverse_adjacency[dst].append(src)
+            if src == dst:
+                self_loops[src] = True
+
+        visited = set()
+        order: List[int] = []
+
+        def dfs(node: int) -> None:
+            visited.add(node)
+            for nxt in adjacency[node]:
+                if nxt not in visited:
+                    dfs(nxt)
+            order.append(node)
+
+        for bb in blocks:
+            if bb not in visited:
+                dfs(bb)
+
+        visited.clear()
+        components: List[List[int]] = []
+
+        def reverse_dfs(node: int, acc: List[int]) -> None:
+            visited.add(node)
+            acc.append(node)
+            for prev in reverse_adjacency[node]:
+                if prev not in visited:
+                    reverse_dfs(prev, acc)
+
+        for bb in reversed(order):
+            if bb in visited:
+                continue
+            component: List[int] = []
+            reverse_dfs(bb, component)
+            components.append(component)
+
+        depths = {bb: 0 for bb in blocks}
+        for component in components:
+            if len(component) > 1:
+                for bb in component:
+                    depths[bb] += 1
+            elif component and self_loops.get(component[0], False):
+                depths[component[0]] += 1
+
+        return depths
 
     # ── GNN inference ──────────────────────────────────────────────────────
 

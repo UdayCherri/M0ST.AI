@@ -72,7 +72,17 @@ class MasterAgent:
             api_key=llm_api_key,
             api_base=llm_base_url,
         )
-        self.graph_agent = GraphAgent(self.graph_store)
+        gnn_cfg = config.get("gnn", {}) if isinstance(config.get("gnn", {}), dict) else {}
+        self.graph_agent = GraphAgent(
+            self.graph_store,
+            model_path=gnn_cfg.get("model_path") or None,
+            arch=gnn_cfg.get("architecture", "gat"),
+            embedding_dim=int(gnn_cfg.get("out_dim", 64)),
+            device=gnn_cfg.get("device", "cpu"),
+            feature_mode=gnn_cfg.get("feature_mode", "full"),
+            input_dim=gnn_cfg.get("input_dim"),
+            hidden_dim=int(gnn_cfg.get("hidden_dim", 128)),
+        )
         self.pseudocode_agent = PseudocodeAgent(self.graph_store)
         self.semantic_agent = LLMSemanticAgent(
             graph_store=self.graph_store,

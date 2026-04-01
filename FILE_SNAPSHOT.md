@@ -1,118 +1,150 @@
-# M0ST Codebase Complete Snapshot
+# M0ST Codebase Snapshot
 
-## Files Retrieved (All Full Contents)
+Updated: 2026-03-16
 
-### AI Security Agents (5 files)
+## Project Identity
 
-1. **llm_agent.py** — LLM-based reasoning for RE tasks (OpenAI, Anthropic, Mistral, local)
-   - Methods: infer_function_name, infer_variables, infer_types, summarize_function, etc.
-   - Supports JSON output, tool calling, context-aware prompting with PKG embeddings
+M0ST is an AI Security System platform with a 7-layer architecture. Reverse engineering and binary analysis are implemented modules inside the Security Modules layer, not the full scope of the platform.
 
-2. **static_agent.py** — Static binary analysis via radare2
-   - Creates functions, basic blocks, instructions, flow edges in graph store
-   - Handles Windows/Unix radare2 path resolution
-   - Publishes STATIC_ANALYSIS_COMPLETE event
+## Verified Inventory (Current Workspace)
 
-3. **pseudocode_agent.py** — Decompilation via Ghidra/radare2
-   - Methods: decompile_function, decompile_all, clear_cache
-   - Supports Ghidra headless, r2 pdg/pdc, and reconstruction from CFG
+### 1. AI Security Agents Layer
 
-4. **dynamic_agent.py** — GDB-based runtime tracing
-   - Traces execution on Linux, records register states and syscalls
-   - Creates Run, ExecutesEdge, RuntimeFlow, SyscallEvent nodes
-   - Not supported on Windows
+Path: ai_security_agents/
 
-5. **llm_semantic_agent.py** — AI-powered semantic analysis
-   - Replaces heuristics with LLM+GNN embeddings for naming/typing/summarization
-   - Fallback to classical methods when LLM unavailable
-   - Full_analysis method combines all inference methods
+- 11 agent implementations plus package export file.
+- Agent files:
+  - **static_agent.py**: Runs static binary analysis and populates functions, basic blocks, instructions, and CFG links.
+  - **graph_agent.py**: Builds graph-derived structural features and embeddings for downstream reasoning.
+  - **llm_agent.py**: Provides provider-agnostic LLM inference and structured JSON response handling.
+  - **pseudocode_agent.py**: Generates pseudocode using configured decompilation backends.
+  - dynamic_agent.py: Executes runtime tracing with strategy-based backends (gdb/docker/windbg/x64dbg).
+  - verifier_agent.py: Validates graph consistency and reports suspicious or contradictory edges.
+  - semantic_agent.py: Produces rule-based semantic interpretations and explanations.
+  - z3_agent.py: Performs SMT-backed constraint reasoning and feasibility checks.
+  - heuristics_agent.py: Applies classical heuristics for quick pattern and behavior signals.
+  - static_post.py: Cleans and normalizes static-analysis artifacts after extraction.
+  - llm_semantic_agent.py: Combines PKG context with LLM reasoning for high-level semantic outputs.
+- Package export: **init**.py: Re-exports agent classes for layer-level imports.
 
-### Knowledge Layer (3 files)
+Key note:
 
-6. **knowledge/program_graph/**init**.py** — Program Knowledge Graph (PKG)
-   - Central unified representation (Functions, BasicBlocks, Instructions, Variables, Structs, etc.)
-   - Node types: FUNCTION, BASIC_BLOCK, INSTRUCTION, VARIABLE, STRUCT, STRING, IMPORT
-   - Edge types: CALL, CFG_FLOW, DATA_FLOW, TYPE_RELATION, USES_STRING, IMPORTS, TYPE_OF
-   - Backward compat with MemoryGraphStore API
+- Dynamic analysis is strategy-based, with support for gdb, docker, windbg, and x64dbg backends.
 
-7. **knowledge/embeddings/**init**.py** — EmbeddingStore
-   - In-memory vector storage with cosine similarity search
-   - Methods: store, get, search_similar, list_keys
+### 2. Orchestration Layer
 
-8. **knowledge/symbol_database/**init**.py** — SymbolDatabase
-   - Stores recovered function/variable names with confidence scores
-   - Methods: add_function_name, add_variable_name, add_type_info
+Path: orchestration/
 
-### AI Engine (2 files)
+- master_agent.py: Initializes system components and runs legacy or AI-driven orchestration flows.
+- planner_agent.py: Executes staged planning pipeline and aggregates run results in AnalysisResult.
+- **init**.py: Defines orchestration package boundary and layer identity.
 
-9. **ai_engine/symbol_recovery/**init**.py** — SymbolRecoveryEngine
-   - Multi-stage name prediction: heuristics → embeddings → LLM
-   - Variable name recovery, argument type inference, struct layout recovery
-   - Persists to SymbolDatabase
+### 3. Security Modules Layer
 
-10. **ai_engine/embedding_models/**init**.py** — BinaryEmbeddingEngine
-    - GNN-based CFG embedding (GAT architecture)
-    - Opcode feature vocabulary with 12 categories
-    - Node features: opcode histogram + structural features
-    - Fallback averaging if GNN unavailable, finds similar functions
+Path: security_modules/
 
-### UI & Orchestration (4 files)
+- reverse_engineering/
+  - **init**.py: Scopes reverse-engineering module purpose to program reconstruction.
+  - disassembly/**init**.py: Exposes disassembly helpers and normalized instruction retrieval.
+  - cfg_recovery/**init**.py: Builds control-flow graph structures from analyzed code.
+  - function_boundary/**init**.py: Detects function boundaries and entry/exit candidates.
+  - call_graph/**init**.py: Builds inter-procedural call relationships.
+  - pseudocode/**init**.py: Provides pseudocode-level reconstruction interfaces.
+  - type_inference/**init**.py: Infers probable type information from program evidence.
+  - struct_recovery/**init**.py: Recovers struct layouts and field usage relations.
+  - semantic_labeling/**init**.py: Assigns semantic labels to reconstructed program units.
+  - deobfuscation/**init**.py: Detects and simplifies obfuscation patterns.
+- ai_assisted_binary_analysis/
+  - **init**.py: Marks AI-assisted security-intelligence module scope.
+  - vulnerability_detection.py: Detects vulnerability patterns and reports severity-tagged findings.
+  - malware_classification.py: Computes suspicious behavior scores and risk classifications.
+  - exploitability_analysis.py: Estimates exploitability with mitigation-aware adjustments.
+  - unsafe_pattern_detection.py: Flags insecure coding and unsafe security anti-patterns.
+- security_modules/**init**.py: Layer package marker and module grouping boundary.
 
-11. **ui/cli.py** — REPL CLI for M0ST
-    - Commands: load, list funcs, info, blocks, insns, edges, explain, pseudocode, verify, trace, complexity, export, plugins, snapshot, status, config
-    - AI commands: ai name, ai explain, ai types, ai refine, ai full, ai vulns, ai annotate, ai ask
-    - Graph intelligence: find callers/callees, show callgraph/dataflow, similar
+### 4. AI Engine Layer
 
-12. **orchestration/master_agent.py** — Top-level orchestrator
-    - Initializes all agents (static, dynamic, GNN, LLM, pseudocode, semantic, verifier, Z3)
-    - Legacy run_pipeline: static → heuristics → verify → GNN → dynamic → plugins → semantic → snapshot
-    - AI-driven run_ai_pipeline via PlannerAgent
-    - Registers LLM tools for agent coordination
+Path: ai_engine/
 
-13. **orchestration/planner_agent.py** — Multi-step planner
-    - AnalysisResult dataclass for final output
-    - 13-stage pipeline: static → call_graph → symbol_recovery → gnn → pseudocode → llm → verify → dynamic → z3 → plugins → refinement → snapshot
-    - Single-function analysis methods: analyse_function, ai_name, ai_explain, ai_types, ai_refine, ai_ask, find_similar
-    - Decision helpers: \_should_run_dynamic, \_should_run_z3
+- **gnn_models/**init**.py**: Defines graph model wrappers used in structural learning workflows.
+- **embedding_models/**init**.py**: Generates and compares embeddings for similarity and context.
+- **llm_inference/**init**.py**: Shared LLM inference abstraction for engine-level integrations.
+- **symbol_recovery/**init**.py**: Recovers symbols using heuristic, embedding, and LLM stages.
+- **training/**init**.py**: Training-related helpers and model lifecycle utilities.
+- **ai_engine/**init**.py**: Package export for AI engine components.
 
-### Security Modules (3 files)
+### 5. Knowledge Layer
 
-14. **security_modules/reverse_engineering/**init**.py** — Module marker
-    - Restricted to program reconstruction only (CFG, call graph, pseudocode, etc.)
-    - Security analysis lives in ai_assisted_binary_analysis
+Path: knowledge/
 
-15. **security_modules/reverse_engineering/deobfuscation/**init**.py** — DeobfuscationEngine
-    - Detects: control-flow flattening, opaque predicates, junk code, packers, virtualization
-    - Methods: analyze, simplify
-    - Computes obfuscation complexity score (0.0-1.0)
+- program_graph/**init**.py: Implements PKG entities/relations and graph operations.
+- embeddings/**init**.py: Stores vectors and serves similarity search queries.
+- symbol_database/**init**.py: Persists symbol candidates with confidence/source metadata.
+- semantic_index/**init**.py: Maintains semantic indexing helpers for retrieval.
+- knowledge/**init**.py: Package export for knowledge-layer components.
 
-16. **security_modules/ai_assisted_binary_analysis/**init**.py** — Module marker
-    - Handles security intelligence: vulnerability detection, exploitability, malware classification, unsafe patterns
+### 6. Storage and Analysis Utilities
 
-### Data & Plugins (2 files)
+Paths:
 
-17. **plugins/**init**.py** — PluginManager
-    - Dynamic recursive plugin discovery from plugins/ directory
-    - Plugin interface: analyze(graph_store, func_addr) → dict
-    - Routes results through PKG annotations when available
+- storage/
+  - memory_graph_store.py: In-memory store for graph facts during active analysis.
+  - sqlite_store.py: Durable storage for metadata and selected analysis outputs.
+  - snapshots.py: Creates and restores reproducible analysis snapshots.
+  - schema.cypher: Graph schema reference for relationship modeling.
+- analysis/
+  - complexity.py: Computes cyclomatic complexity and classifies control-flow complexity.
+  - constraint_pass.py: Applies constraint-guided pruning of infeasible control-flow paths.
+  - export.py: Exports analysis state and summaries to JSON.
 
-18. **data/datasets/**init**.py** — Dataset pipeline
-    - DatasetPipeline: collects 4 dataset types (embeddings, vulnerabilities, symbols, deobfuscation)
-    - SourceCompiler: compiles C/C++ with/without debug info for training data
-    - TrainingDataGenerator: pairs debug/stripped binaries, extracts ground-truth labels
+### 7. Plugin System
 
-### Core (1 file)
+Path: plugins/
 
-19. **core/capabilities.py** — Capability-based access control
-    - Enum: STATIC_READ, STATIC_WRITE, DYNAMIC_EXECUTE, SEMANTIC_REASON, VERIFY, SNAPSHOT, PLUGIN_ANALYSIS, LLM_INFERENCE, GNN_INFERENCE, PSEUDOCODE, PLANNING
-    - enforce_capability(agent, capability) function
+- plugin manager:
+  - **init**.py: Recursively discovers, loads, and executes plugin analyzers.
+- currently present plugin modules:
+  - anti_debug/anti_debug.py: Detects anti-debugging behavior signatures.
+  - crypto/crypto_detect.py: Detects suspicious crypto constants and API usage.
+  - entropy/entropy_analysis.py: Produces entropy-based packed/encoded code signals.
+  - loop_detect/loop_detect.py: Flags loop-heavy instruction behaviors.
+  - magic_pattern/magic_detect.py: Matches magic bytes and known marker patterns.
+  - network_api/network_api.py: Flags suspicious network API usage.
+  - packer_detect/packer_detect.py: Detects indicators of packers/protectors.
+  - string_decoder/string_decode.py: Detects probable string decoding logic.
+  - string_decrypt/string_decrypt.py: Detects probable string decryption routines.
 
-## Key Insights
+### 8. Interface and Entry Points
 
-- **PKG (Program Knowledge Graph)** is the central hub for all inter-agent communication
-- **LLMSemanticAgent** replaces heuristics with LLM+GNN for AI-driven analysis
-- **PlannerAgent** orchestrates 13-stage pipeline with conditional stages (dynamic, z3)
-- **Capabilities system** prevents unauthorized operations across agents
-- **Plugin system** allows extensible analysis via PKG annotations
-- **Dataset pipeline** supports fine-tuning GNN/LLM with labeled training data
-- **CLI** provides both legacy (show, load) and AI (ai name, ai explain) command sets
+Paths:
+
+- main.py: Bootstraps the application and launches the interface entrypoint.
+- ui/cli.py: Main interactive CLI and command orchestration surface.
+- interface/cli/**init**.py: CLI package bridge for interface layer imports.
+- interface/api/**init**.py: API package scaffold for service endpoints.
+- interface/commands/**init**.py: Command-handler package scaffold.
+
+### 9. Data and Training Pipeline
+
+Paths:
+
+- data/datasets/**init**.py: Dataset collection and training-data generation utilities.
+- data/binaries/**init**.py: Binary repository package marker and related hooks.
+- data/analysis_results/**init**.py: Analysis-result package marker and persistence hooks.
+- data/**init**.py: Data-layer package marker and shared data-layer entry.
+
+Highlights:
+
+- DatasetPipeline supports function_embeddings, vulnerability_labels, symbol_recovery, and deobfuscation datasets.
+- Includes source compilation and stripped/debug pairing for training data generation.
+
+## Current Pipeline Snapshot
+
+### Legacy Pipeline (MasterAgent)
+
+static -> heuristics -> verify -> gnn -> dynamic -> plugins -> semantic -> snapshot
+
+### AI-Driven Pipeline (PlannerAgent)
+
+static_analysis -> call_graph_building -> symbol_recovery -> gnn_analysis -> pseudocode_extraction -> llm_analysis -> verification -> dynamic_analysis (conditional) -> z3_analysis (conditional) -> plugin_analysis -> refinement -> snapshot
+

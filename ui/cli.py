@@ -11,7 +11,7 @@ from core.config import get_config
 # All known CLI commands for autocomplete and suggestions
 _ALL_COMMANDS = [
     "load", "list funcs", "info", "blocks", "insns", "edges",
-    "explain", "pseudocode", "verify", "trace", "complexity",
+    "explain", "pseudocode", "verify", "verification", "z3", "trace", "complexity",
     "export", "plugins", "snapshot", "status", "config",
     "ai ask", "ai pipeline",
     "find callers", "find callees", "find imports", "find strings", "find recursion",
@@ -107,7 +107,8 @@ def _print_help(page: str = ""):
             "  explain simple <addr>      Brief summary\n"
             "  explain deep <addr>        Detailed summary with vulns\n"
             "  pseudocode <func_addr>     Generate C-like pseudocode\n"
-            "  verify                     Run verifier on current graph\n"
+            "  verify                     Run symbolic verification (Z3)\n"
+            "  z3                         Alias for symbolic verification\n"
             "  trace                      Re-run dynamic trace on loaded binary\n"
             "  complexity [func_addr]     Show cyclomatic complexity metrics\n"
             "  export <path>              Export analysis to JSON report\n"
@@ -256,7 +257,7 @@ def _check_tool_availability():
 
 
 def _cmd_load(args, master, state):
-    """Load and analyze a binary."""
+    """Load and analyze a binary using the default pipeline."""
     if not args:
         print("Usage: load <binary_path>")
         return
@@ -267,10 +268,10 @@ def _cmd_load(args, master, state):
         print(f"File not found: {path}")
         return
     state["binary"] = path
-    verbose = state.get("verbose", False)
-    print(f"[M0ST] Running pipeline for {path}...")
+    print(f"[M0ST] Loading binary: {path}")
     try:
-        master.run_pipeline(path, verbose=verbose)
+        # Use the default pipeline: disassembly → CFG → call graph → PKG → snapshot
+        master.planner.run_default_pipeline(path)
     except Exception as e:
         print(f"[M0ST] Pipeline error: {e}")
 
@@ -463,14 +464,24 @@ def _cmd_pseudocode(args, cgen):
         print(f"Error generating pseudocode: {e}")
 
 
-def _cmd_verify(master, graph):
-    """Run verifier on the current graph."""
-    print("[M0ST] Running verifier...")
+def _cmd_verify(master, graph, state):
+    """Run symbolic analysis and verification on the current graph."""
+    print("[M0ST] [Symbolic Analysis] Running verification pipeline...")
+    binary = state.get("binary")
+
+    # First pass: graph consistency verification.
     try:
         master.verifier_agent.verify_basicblock_edges()
     except Exception as e:
         print(f"[M0ST] Verifier error: {e}")
         return
+
+    # Second pass: Z3-based symbolic pruning/verification.
+    try:
+        master.planner.run_symbolic_pipeline(binary)
+    except Exception as e:
+        print(f"[M0ST] Z3 analysis error: {e}")
+
     try:
         results = graph.get_verification_results()
     except Exception:
@@ -492,18 +503,19 @@ def _cmd_verify(master, graph):
                     print(f"    ! {p}")
     else:
         print("  No verification results.")
+    print("  Symbolic stage: completed")
     print()
 
 
 def _cmd_trace(master, state):
-    """Re-run dynamic trace on the loaded binary."""
+    """Run dynamic analysis on the loaded binary."""
     binary = state.get("binary")
     if not binary:
         print("No binary loaded. Use 'load <binary>' first.")
         return
-    print(f"[M0ST] Re-tracing {binary}...")
+    print(f"[M0ST] [Dynamic Analysis] Running runtime trace on {binary}...")
     try:
-        master.run_pipeline(binary, verbose=state.get("verbose", False))
+        master.planner.run_dynamic_pipeline(binary)
     except Exception as e:
         print(f"[M0ST] Trace error: {e}")
 
@@ -726,48 +738,33 @@ def _cmd_config():
 
 
 def _cmd_ai(args, master, state):
-    """Handle AI-driven commands."""
+    """Handle AI-driven commands (LLM reasoning pipeline)."""
     import json as _json
 
     if not args:
         print(
             "Usage:\n"
+            "  ai explain <addr>  LLM-based function summary (LLM reasoning)\n"
             "  ai name <addr>     LLM-based function naming\n"
-            "  ai explain <addr>  LLM-based function summary\n"
             "  ai types <addr>    LLM-based type inference\n"
             "  ai refine <addr>   Integrated GNN + LLM analysis\n"
-            "  ai full            Full multi-agent AI analysis\n"
-            "  ai vulns <addr>    LLM-based vulnerability detection\n"
+            "  ai vulns           Run vulnerability analysis on all functions\n"
+            "  ai vulns <addr>    LLM-based vulnerability detection for function\n"
             "  ai annotate <addr> LLM-based code annotation\n"
-            "  ai ask <question>  Free-form AI analyst query\n"
+            "  ai ask <question>  Free-form AI analyst query (LLM reasoning)\n"
+            "  ai full            Full multi-agent AI analysis pipeline\n"
         )
         return
 
     subcmd = args[0].lower()
 
-    # ai ask — free-form query
+    # ai ask — free-form query (LLM reasoning pipeline)
     if subcmd == "ask":
         if len(args) < 2:
             print("Usage: ai ask <question>")
             return
         question = " ".join(args[1:])
-    elif subcmd in ("explain", "name", "types", "refine", "vulns", "annotate") and len(args) >= 2:
-        # If the second word doesn't look like an address, treat the whole thing as a free-form ask
-        try:
-            _parse_addr(args[1])
-        except Exception:
-            # Not a valid address — route to free-form ask
-            question = " ".join(args)
-            subcmd = "ask"
-    
-    if subcmd == "ask":
-        if "question" not in dir():
-            # Came directly via `ai ask <words>`
-            if len(args) < 2:
-                print("Usage: ai ask <question>")
-                return
-            question = " ".join(args[1:])
-        print(f"[M0ST] Processing query: {question}")
+        print(f"[M0ST] [LLM Reasoning] Processing query: {question}")
         try:
             result = master.semantic_agent.ask(question)
             answer = result.get("answer", "No answer available.")
@@ -801,7 +798,7 @@ def _cmd_ai(args, master, state):
             return
         print(f"[M0ST] Running full AI pipeline for {binary}...")
         try:
-            result = master.run_ai_pipeline(binary)
+            result = master.planner.run_full_pipeline(binary)
             print(f"\n[M0ST] Analysis complete.")
             print(f"  Functions analyzed: {result.total_functions}")
             print(f"  Time: {result.total_time_seconds:.1f}s")
@@ -812,6 +809,49 @@ def _cmd_ai(args, master, state):
                 print(f"  Vulnerability hints: {len(result.vulnerability_hints)}")
         except Exception as e:
             print(f"[M0ST] Pipeline error: {e}")
+        return
+
+    # ai vulns — full vulnerability analysis pipeline or per-function detection
+    if subcmd == "vulns":
+        if len(args) >= 2:
+            # Per-function vulnerability detection
+            try:
+                addr = _parse_addr(args[1])
+            except Exception:
+                print("Invalid function address.")
+                return
+            
+            print(f"[M0ST] Detecting vulnerabilities at 0x{addr:x}...")
+            try:
+                result = master.semantic_agent.detect_vulnerabilities(addr)
+                vulns = result.get("vulnerabilities", [])
+                if not vulns:
+                    print(f"\n  No vulnerabilities detected for 0x{addr:x}.")
+                else:
+                    print(f"\n  Vulnerabilities for 0x{addr:x}:")
+                    for v in vulns:
+                        if isinstance(v, dict):
+                            print(f"    ! [{v.get('severity', 'unknown')}] {v.get('type', '?')}")
+                            print(f"      {v.get('description', '')}")
+                        else:
+                            print(f"    ! {v}")
+            except Exception as e:
+                print(f"[M0ST] Error: {e}")
+        else:
+            # Full binary vulnerability analysis pipeline
+            print(f"[M0ST] [Vulnerability Analysis] Running full vulnerability detection pipeline...")
+            try:
+                result = master.planner.run_vulnerability_pipeline()
+                print(f"\n[M0ST] Vulnerability analysis complete.")
+                print(f"  Functions analyzed: {result.total_functions}")
+                print(f"  Time: {result.total_time_seconds:.1f}s")
+                if result.vulnerability_hints:
+                    print(f"  Vulnerabilities found: {len(result.vulnerability_hints)}")
+                    for addr, vulns in result.vulnerability_hints.items():
+                        print(f"    0x{addr:x}: {len(vulns)} issue(s)")
+            except Exception as e:
+                print(f"[M0ST] Pipeline error: {e}")
+        print()
         return
 
     # All other AI commands need an address
@@ -840,6 +880,7 @@ def _cmd_ai(args, master, state):
             print()
 
         elif subcmd == "explain":
+            print(f"[M0ST] [LLM Reasoning] Explaining function at 0x{addr:x}...")
             result = planner.ai_explain(addr)
             if "error" in result:
                 print(f"  Error: {result['error']}")
@@ -1098,7 +1139,7 @@ def _cmd_show(args, graph):
 
 
 def _cmd_similar(args, master):
-    """Find functions similar to a given function by embedding."""
+    """Find functions similar to a given function via GNN embeddings."""
     if not args:
         print("Usage: similar <func_addr>")
         return
@@ -1108,11 +1149,13 @@ def _cmd_similar(args, master):
         print("Invalid function address.")
         return
 
+    print(f"[M0ST] [GNN Embeddings] Computing similar functions for 0x{addr:x}...")
+    
     graph = master.graph_store
     funcs = graph.fetch_functions()
     name_map = {f.get("addr"): f.get("name", "???") for f in funcs}
 
-    # Try using the graph agent's embedding engine
+    # Use the graph agent's embedding engine (GNN embeddings pipeline)
     try:
         similar = master.graph_agent.find_similar(addr)
         if not similar:
@@ -1184,9 +1227,9 @@ def main():
         abs_path = os.path.abspath(initial_path)
         if os.path.isfile(abs_path):
             state["binary"] = abs_path
-            print(f"[M0ST] Running pipeline for {abs_path}...")
+            print(f"[M0ST] Running default pipeline for {abs_path}...")
             try:
-                master.run_pipeline(abs_path, verbose=state["verbose"])
+                master.planner.run_default_pipeline(abs_path)
             except Exception as e:
                 print(f"[M0ST] Pipeline error: {e}")
         else:
@@ -1273,7 +1316,12 @@ def main():
 
             # ── verify ───────────────────────────────────
             if cmd == "verify":
-                _cmd_verify(master, graph)
+                _cmd_verify(master, graph, state)
+                continue
+
+            # ── z3 / verification aliases ───────────────
+            if cmd in {"z3", "verification"}:
+                _cmd_verify(master, graph, state)
                 continue
 
             # ── trace ────────────────────────────────────
